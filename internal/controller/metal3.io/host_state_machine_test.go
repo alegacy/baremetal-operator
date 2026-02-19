@@ -1427,6 +1427,10 @@ func (p *mockProvisioner) DetachDataImage() (err error) {
 	return nil
 }
 
+func (m *mockProvisioner) EnsurePorts() (err error) {
+	return nil
+}
+
 func (m *mockProvisioner) SetSwitchPortConfigs(_ map[string]*provisioner.SwitchPortConfig) (err error) {
 	return nil
 }

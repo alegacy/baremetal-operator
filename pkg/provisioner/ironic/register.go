@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"strings"
 
 	"github.com/gophercloud/gophercloud/v2"
 	"github.com/gophercloud/gophercloud/v2/openstack/baremetal/v1/nodes"
+	"github.com/gophercloud/gophercloud/v2/openstack/baremetal/v1/ports"
 	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	"github.com/metal3-io/baremetal-operator/pkg/hardwareutils/bmc"
 	"github.com/metal3-io/baremetal-operator/pkg/provisioner"
@@ -129,15 +131,16 @@ func (p *ironicProvisioner) Register(data provisioner.ManagementAccessData, cred
 
 		updater.SetTopLevelOpt("name", ironicNodeName(p.objectMeta), ironicNode.Name)
 
-		// When node exists but has no assigned port to it by Ironic and actuall address (MAC) is present
-		// in host config and is not allocated to different node lets try to create port for this node.
-		if p.bootMACAddress != "" {
-			err = p.ensurePort(ironicNode)
-			if err != nil {
-				result, err = transientError(err)
-				return result, provID, err
-			}
+		// Audit the ports to ensure they match our expected configuration
+		err = p.ensurePorts(ironicNode.UUID)
+		if err != nil {
+			// Port creation failed - return error for retry
+			result, err = transientError(fmt.Errorf("failed to ensure ports: %w", err))
+			return result, provID, err
 		}
+
+		p.log.Info("successfully ensured all ports for existing node",
+			"nodeUUID", ironicNode.UUID)
 
 		bmcAddressChanged := !bmcAddressMatches(ironicNode, driverInfo)
 
@@ -286,8 +289,116 @@ func (p *ironicProvisioner) enrollNode(data provisioner.ManagementAccessData, bm
 	return ironicNode, false, nil
 }
 
-func (p *ironicProvisioner) ensurePort(ironicNode *nodes.Node) error {
-	nodeHasAssignedPort, err := p.nodeHasAssignedPort(ironicNode.UUID)
+// ensurePorts ensures all network interface ports exist in Ironic.
+//
+// For initial enrollment (before inspection):
+//   - Creates only boot MAC port (hardware details not yet available)
+//
+// For re-registration or post-inspection:
+//   - Creates ports for all NICs from stored hardware details
+func (p *ironicProvisioner) ensurePorts(nodeUUID string) error {
+	hardwareDetails := p.getStoredHardwareDetails()
+
+	// If no hardware details available, fall back to boot MAC only
+	// This happens during initial enrollment before inspection
+	if hardwareDetails == nil {
+		p.log.Info("no stored hardware details available, ensuring boot MAC port only",
+			"nodeUUID", nodeUUID)
+
+		if p.bootMACAddress != "" {
+			return p.ensurePxePort(nodeUUID)
+		}
+		return nil
+	}
+
+	// TODO(alegacy): should we make this optional?
+
+	// Deduplicate NICs by MAC address to avoid duplicate ports
+	uniqueNICs := deduplicateNICsByMAC(hardwareDetails.NIC)
+
+	p.log.Info("ensuring ports for all network interfaces",
+		"count", len(uniqueNICs),
+		"nodeUUID", nodeUUID)
+
+	// List all existing ports for this node once
+	existingPorts, err := p.listNodePorts(nodeUUID)
+	if err != nil {
+		return fmt.Errorf("failed to list existing ports: %w", err)
+	}
+
+	// Build MAC → Port lookup map for fast access
+	portsByMAC := make(map[string]ports.Port)
+	for _, port := range existingPorts {
+		mac := strings.ToLower(port.Address)
+		portsByMAC[mac] = port
+	}
+
+	// Track failures for error reporting
+	var failures []string
+	successCount := 0
+
+	// Ensure each unique NIC has a port
+	for _, nic := range uniqueNICs {
+		if nic.MAC == "" {
+			continue // Skip NICs without MAC (should already be filtered)
+		}
+
+		isPXEPort := nic.PXE || strings.EqualFold(nic.MAC, p.bootMACAddress)
+
+		// Try to find switch config by interface name first, then by MAC address
+		// This supports both NetworkInterface.Name and NetworkInterface.MACAddress keys
+		var switchConfig *provisioner.SwitchPortConfig
+		if nic.Name != "" {
+			switchConfig = p.switchPortConfigs[strings.ToLower(nic.Name)]
+		}
+		if switchConfig == nil && nic.MAC != "" {
+			switchConfig = p.switchPortConfigs[strings.ToLower(nic.MAC)]
+		}
+
+		// Check if port already exists
+		var existingPort *ports.Port
+		if port, exists := portsByMAC[strings.ToLower(nic.MAC)]; exists {
+			existingPort = &port
+		}
+
+		err := p.ensurePort(nodeUUID, nic, isPXEPort, switchConfig, existingPort)
+		if err != nil {
+			p.log.Error(err, "failed to ensure port for interface",
+				"interface", nic.Name,
+				"MAC", nic.MAC)
+			failures = append(failures, fmt.Sprintf("%s(%s): %v", nic.Name, nic.MAC, err))
+		} else {
+			successCount++
+		}
+	}
+
+	// Report results
+	if len(failures) > 0 {
+		p.log.Info("port reconciliation completed with failures",
+			"successful", successCount,
+			"failed", len(failures),
+			"total", len(uniqueNICs))
+		// Cap the number of failures reported in the error message
+		reported := failures
+		if len(reported) > 3 {
+			reported = reported[:3]
+		}
+		return fmt.Errorf("failed to ensure %d/%d ports: %s",
+			len(failures), len(uniqueNICs), strings.Join(reported, "; "))
+	}
+
+	p.log.Info("successfully ensured all ports",
+		"count", successCount,
+		"nodeUUID", nodeUUID)
+
+	// TODO(alegacy): Remove stale Ironic ports that may no longer correspond
+	// to a NIC entry.  Maybe Ironic automatically does this after inspection?
+
+	return nil
+}
+
+func (p *ironicProvisioner) ensurePxePort(nodeUUID string) error {
+	nodeHasAssignedPort, err := p.nodeHasAssignedPort(nodeUUID)
 	if err != nil {
 		return err
 	}
@@ -299,7 +410,7 @@ func (p *ironicProvisioner) ensurePort(ironicNode *nodes.Node) error {
 		}
 
 		if !addressIsAllocatedToPort {
-			err = p.createPXEEnabledNodePort(ironicNode.UUID, p.bootMACAddress,
+			err = p.createPXEEnabledNodePort(nodeUUID, p.bootMACAddress,
 				p.switchPortConfigs[p.bootMACAddress])
 			if err != nil {
 				return err

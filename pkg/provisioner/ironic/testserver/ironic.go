@@ -322,6 +322,32 @@ func (m *IronicMock) Port(port ports.Port) *IronicMock {
 	return m
 }
 
+// PortDetail configures the server with a valid response for
+//
+//	[GET] /v1/ports/detail
+//
+// This is used by listNodePorts() which calls ports.ListDetail().
+func (m *IronicMock) PortDetail(portList []ports.Port) *IronicMock {
+	resp := map[string][]ports.Port{
+		"ports": portList,
+	}
+
+	m.ResponseJSON(m.buildURL("/v1/ports/detail", http.MethodGet), resp)
+	return m
+}
+
+// PortCreate configures the server with a valid response for
+//
+//	[POST] /v1/ports
+func (m *IronicMock) PortCreate(port ports.Port) *IronicMock {
+	content, err := json.Marshal(port)
+	if err != nil {
+		m.t.Error(err)
+	}
+	m.ResponseWithCode(m.buildURL("/v1/ports", http.MethodPost), string(content), http.StatusCreated)
+	return m
+}
+
 // Nodes configure the server with a valid response for /v1/nodes.
 func (m *IronicMock) Nodes(allNodes []nodes.Node) *IronicMock {
 	resp := struct {

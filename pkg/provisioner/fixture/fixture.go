@@ -436,3 +436,8 @@ func (p *fixtureProvisioner) SetSwitchPortConfigs(configs map[string]*provisione
 	p.state.switchPortConfigs = configs
 	return nil
 }
+
+// EnsurePorts is a no-op for fixture provisioner
+func (p *fixtureProvisioner) EnsurePorts() error {
+	return nil
+}

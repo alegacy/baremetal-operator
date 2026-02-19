@@ -39,6 +39,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -223,9 +224,16 @@ func (r *BareMetalHostReconciler) Reconcile(ctx context.Context, request ctrl.Re
 		return ctrl.Result{}, fmt.Errorf("failed to resolve network attachments: %w", err)
 	}
 
-	// Build host data with switch port configurations
-	provisionerHostData := provisioner.BuildHostData(*host, *bmcCreds)
-	provisionerHostData.SwitchPortConfigs = switchPortConfigs
+	// Get stored hardware details for port recreation after Ironic database loss
+	// May be nil during initial registration (before inspection) - this is expected
+	hardwareDetails, err := r.getStoredHardwareDetails(ctx, host)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Build host data with all necessary information
+	provisionerHostData := provisioner.BuildHostDataWithSwitchPortConfigs(*host, *bmcCreds, switchPortConfigs)
+	provisionerHostData.HardwareDetails = hardwareDetails
 
 	prov, err := r.ProvisionerFactory.NewProvisioner(ctx, provisionerHostData, info.publishEvent)
 	if err != nil {
@@ -1131,6 +1139,12 @@ func (r *BareMetalHostReconciler) actionInspecting(prov provisioner.Provisioner,
 		return actionError{fmt.Errorf("failed to create hardwareData: %w", err)}
 	}
 	info.log.Info(fmt.Sprintf("Created hardwareData %q in %q namespace\n", hd.Name, hd.Namespace))
+
+	// Ensure all discovered network ports exist in Ironic with switch
+	// port configuration from HostNetworkAttachment resources.
+	if err := prov.EnsurePorts(); err != nil {
+		return actionError{fmt.Errorf("failed to ensure network ports after inspection: %w", err)}
+	}
 
 	return actionComplete{}
 }
@@ -2273,6 +2287,34 @@ func (r *BareMetalHostReconciler) getHardwareDetailsFromAnnotation(host *metal3a
 		return nil, err
 	}
 	return objHardwareDetails, nil
+}
+
+// getStoredHardwareDetails retrieves stored hardware details for port recreation.
+// Returns hardware details from HardwareData CR or BMH status, or nil if unavailable.
+// This is used to recreate Ironic ports with LLDP data after database loss.
+func (r *BareMetalHostReconciler) getStoredHardwareDetails(ctx context.Context, host *metal3api.BareMetalHost) (*metal3api.HardwareDetails, error) {
+	// Try to get from HardwareData CR first (preferred source)
+	hardwareDataKey := types.NamespacedName{
+		Namespace: host.Namespace,
+		Name:      host.Name,
+	}
+	hardwareData := &metal3api.HardwareData{}
+	err := r.Client.Get(ctx, hardwareDataKey, hardwareData)
+	if err == nil {
+		if hardwareData.Spec.HardwareDetails != nil {
+			return hardwareData.Spec.HardwareDetails, nil
+		}
+	} else if !k8serrors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get HardwareData %s/%s: %w", host.Namespace, host.Name, err)
+	}
+
+	// Fallback to BMH status if HardwareData not found
+	if host.Status.HardwareDetails != nil {
+		return host.Status.HardwareDetails, nil
+	}
+
+	// No hardware details available (expected during initial enrollment)
+	return nil, nil
 }
 
 func (r *BareMetalHostReconciler) setErrorCondition(ctx context.Context, request ctrl.Request, host *metal3api.BareMetalHost, errType metal3api.ErrorType, message string) (err error) {

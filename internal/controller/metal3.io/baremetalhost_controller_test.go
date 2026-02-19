@@ -3166,3 +3166,79 @@ func TestHFSEmptyStatusSettings(t *testing.T) {
 		},
 	)
 }
+
+func TestGetStoredHardwareDetails_FromHardwareDataCR(t *testing.T) {
+	host := newDefaultHost(t)
+
+	hwdata := &metal3api.HardwareData{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      host.Name,
+			Namespace: host.Namespace,
+		},
+		Spec: metal3api.HardwareDataSpec{
+			HardwareDetails: &metal3api.HardwareDetails{
+				Hostname: "from-hardwaredata",
+			},
+		},
+	}
+
+	r := newTestReconciler(t, host, hwdata)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Equal(t, "from-hardwaredata", details.Hostname)
+}
+
+func TestGetStoredHardwareDetails_FallbackToBMHStatus(t *testing.T) {
+	host := newDefaultHost(t)
+	host.Status.HardwareDetails = &metal3api.HardwareDetails{
+		Hostname: "from-bmh-status",
+	}
+
+	// No HardwareData CR exists
+	r := newTestReconciler(t, host)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Equal(t, "from-bmh-status", details.Hostname)
+}
+
+func TestGetStoredHardwareDetails_NoneAvailable(t *testing.T) {
+	host := newDefaultHost(t)
+	// No HardwareData CR and no HardwareDetails in status
+
+	r := newTestReconciler(t, host)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	assert.Nil(t, details)
+}
+
+func TestGetStoredHardwareDetails_HardwareDataCRPriority(t *testing.T) {
+	host := newDefaultHost(t)
+	// Both sources available - HardwareData CR should take priority
+	host.Status.HardwareDetails = &metal3api.HardwareDetails{
+		Hostname: "from-bmh-status",
+	}
+
+	hwdata := &metal3api.HardwareData{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      host.Name,
+			Namespace: host.Namespace,
+		},
+		Spec: metal3api.HardwareDataSpec{
+			HardwareDetails: &metal3api.HardwareDetails{
+				Hostname: "from-hardwaredata",
+			},
+		},
+	}
+
+	r := newTestReconciler(t, host, hwdata)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Equal(t, "from-hardwaredata", details.Hostname)
+}

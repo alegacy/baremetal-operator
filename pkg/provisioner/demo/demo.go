@@ -343,3 +343,8 @@ func (p *demoProvisioner) DetachDataImage() (err error) {
 func (p *demoProvisioner) SetSwitchPortConfigs(configs map[string]*provisioner.SwitchPortConfig) (err error) {
 	return nil
 }
+
+// EnsurePorts is a no-op for demo provisioner
+func (p *demoProvisioner) EnsurePorts() error {
+	return nil
+}

@@ -36,6 +36,12 @@ type HostData struct {
 	BootMACAddress                 string
 	ProvisionerID                  string
 	SwitchPortConfigs              map[string]*SwitchPortConfig
+
+	// HardwareDetails contains stored hardware information from inspection
+	// for port recreation after Ironic database loss. Optional - if nil,
+	// only boot MAC port will be created. This is populated from the
+	// HardwareData CR or BMH status by the controller.
+	HardwareDetails *metal3api.HardwareDetails
 }
 
 func BuildHostData(host metal3api.BareMetalHost, bmcCreds bmc.Credentials) HostData {
@@ -47,6 +53,14 @@ func BuildHostData(host metal3api.BareMetalHost, bmcCreds bmc.Credentials) HostD
 		BootMACAddress:                 host.Spec.BootMACAddress,
 		ProvisionerID:                  host.Status.Provisioning.ID,
 	}
+}
+
+// If switch port management is enabled, then the switch port configurations are
+// passed in as a map of mac addresses to switch port configurations.
+func BuildHostDataWithSwitchPortConfigs(host metal3api.BareMetalHost, bmcCreds bmc.Credentials, switchPortConfigs map[string]*SwitchPortConfig) HostData {
+	result := BuildHostData(host, bmcCreds)
+	result.SwitchPortConfigs = switchPortConfigs
+	return result
 }
 
 // For controllers that do not need to manage the BMC just set the host and node ID to use with Ironic API.
@@ -246,6 +260,13 @@ type Provisioner interface {
 
 	// SetSwitchPortConfigs sets the switch port configurations for the host
 	SetSwitchPortConfigs(configs map[string]*SwitchPortConfig) (err error)
+
+	// EnsurePorts ensures all network ports exist in the provisioning system
+	// with proper LLDP data and switch configurations. This is called:
+	//   - After inspection completes (to create ports for all discovered NICs)
+	//   - During re-registration (to recreate ports after database loss)
+	//   - When network configuration changes require port reconciliation
+	EnsurePorts() error
 }
 
 // Result holds the response from a call in the Provsioner API.

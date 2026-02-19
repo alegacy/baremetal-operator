@@ -192,10 +192,6 @@ func (r *BareMetalHostReconciler) applySwitchPortConfigs(ctx context.Context, pr
 
 	r.Log.Info("ALEGACY ApplySwitchPortConfigs -- configs", "configs", configs)
 
-	// Convert name-keyed configs to MAC-keyed for the provisioner
-	// since Ironic ports are identified by MAC address
-	configs = resolveConfigKeysToMAC(configs, host.Status.HardwareDetails)
-
 	// Apply network configuration to ports (includes cleanup of removed configs)
 	if err := prov.SetSwitchPortConfigs(configs); err != nil {
 		return false, fmt.Errorf("failed to apply switch port configuration to ports: %w", err)
@@ -333,36 +329,4 @@ func (r *BareMetalHostReconciler) resolveSwitchPortConfigs(ctx context.Context, 
 	}
 
 	return configs, nil
-}
-
-// resolveConfigKeysToMAC converts name-keyed switch port configs to MAC-keyed.
-// The provisioner (Ironic) identifies ports by MAC address, but the user specifies
-// configs by interface name. This function uses hardware details to map interface
-// names to their MAC addresses.
-// Keys that are already MAC addresses are preserved as-is (lowercased).
-func resolveConfigKeysToMAC(configs map[string]*provisioner.SwitchPortConfig, hardwareDetails *metal3api.HardwareDetails) map[string]*provisioner.SwitchPortConfig {
-	if hardwareDetails == nil || len(configs) == 0 {
-		return configs
-	}
-
-	// Build name→MAC lookup from hardware details
-	nameToMAC := make(map[string]string)
-	for _, nic := range hardwareDetails.NIC {
-		if nic.Name != "" && nic.MAC != "" {
-			nameToMAC[nic.Name] = strings.ToLower(nic.MAC)
-		}
-	}
-
-	resolved := make(map[string]*provisioner.SwitchPortConfig, len(configs))
-	for key, config := range configs {
-		if mac, ok := nameToMAC[key]; ok {
-			// Key is an interface name — resolve to MAC
-			resolved[mac] = config
-		} else {
-			// Key is already a MAC or unresolvable — keep as lowercase
-			resolved[strings.ToLower(key)] = config
-		}
-	}
-
-	return resolved
 }
