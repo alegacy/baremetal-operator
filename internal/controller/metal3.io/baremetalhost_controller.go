@@ -93,6 +93,10 @@ func (info *reconcileInfo) publishEvent(reason, message string) {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;update;patch
 
+// Allow reading HostNetworkAttachments for switch port configuration
+// Controller only reads attachments referenced by BMH NetworkInterfaces
+// +kubebuilder:rbac:groups=metal3.io,resources=hostnetworkattachments,verbs=get;list;watch
+
 // Allow for managing hostfirmwaresettings, firmwareschema, bmceventsubscriptions and hostfirmwarecomponents
 // +kubebuilder:rbac:groups=metal3.io,resources=hostfirmwaresettings,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=metal3.io,resources=firmwareschemas,verbs=get;list;watch;create;update;patch
@@ -214,7 +218,16 @@ func (r *BareMetalHostReconciler) Reconcile(ctx context.Context, request ctrl.Re
 		bmcCredsSecret: bmcCredsSecret,
 	}
 
-	prov, err := r.ProvisionerFactory.NewProvisioner(ctx, provisioner.BuildHostData(*host, *bmcCreds), info.publishEvent)
+	switchPortConfigs, err := r.resolveSwitchPortConfigs(ctx, host)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to resolve network attachments: %w", err)
+	}
+
+	// Build host data with switch port configurations
+	provisionerHostData := provisioner.BuildHostData(*host, *bmcCreds)
+	provisionerHostData.SwitchPortConfigs = switchPortConfigs
+
+	prov, err := r.ProvisionerFactory.NewProvisioner(ctx, provisionerHostData, info.publishEvent)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to create provisioner: %w", err)
 	}
@@ -1184,6 +1197,15 @@ func getUpdatesDifference(specUpdates []metal3api.FirmwareUpdate, statusUpdates 
 func (r *BareMetalHostReconciler) actionPreparing(prov provisioner.Provisioner, info *reconcileInfo) actionResult {
 	info.log.Info("preparing")
 
+	// TODO(alegacy): don't think this is appropriate
+
+	if actResult := r.manageSwitchPortConfigs(info.ctx, prov, info); actResult != nil {
+		// Check if it's actionContinue (no changes) vs actionUpdate/actionError
+		if _, isContinue := actResult.(actionContinue); !isContinue {
+			return actResult
+		}
+	}
+
 	bmhDirty, newStatus, err := getHostProvisioningSettings(info.host, info)
 	if err != nil {
 		return actionError{err}
@@ -1915,10 +1937,23 @@ func (r *BareMetalHostReconciler) actionManageSteadyState(prov provisioner.Provi
 // use Adopt() because we don't want Ironic to treat the host as
 // having been provisioned. Then we monitor its power status.
 func (r *BareMetalHostReconciler) actionManageAvailable(prov provisioner.Provisioner, info *reconcileInfo) actionResult {
+	info.log.Info("ALEGACY actionManageAvailable")
 	if info.host.NeedsProvisioning() {
 		clearError(info.host)
 		return actionComplete{}
 	}
+
+	info.log.Info("ALEGACY actionManageAvailable - manage ports")
+	// Handle network configuration changes while available
+	if actResult := r.manageSwitchPortConfigs(info.ctx, prov, info); actResult != nil {
+		// Check if it's actionContinue (no changes) vs actionUpdate/actionError
+		if _, isContinue := actResult.(actionContinue); !isContinue {
+			return actResult
+		}
+	}
+
+	info.log.Info("ALEGACY actionManageAvailable - manage power")
+
 	return r.manageHostPower(prov, info)
 }
 

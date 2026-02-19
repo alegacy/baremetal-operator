@@ -374,6 +374,29 @@ type FirmwareConfig struct {
 	SriovEnabled *bool `json:"sriovEnabled,omitempty"`
 }
 
+// NetworkInterface defines the network configuration for a specific interface.
+type NetworkInterface struct {
+	// Name of the network interface (e.g., "eth0", "ens1f0")
+	// This must match the name of a NIC in status.hardware.nics.
+	// If MACAddress is set then this field is ignored.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// MAC address of the network interface.  This must match the MAC address
+	// of the network interface in status.hardware.nics.
+	// +optional
+	// +kubebuilder:validation:Pattern=`[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}`
+	MACAddress string `json:"macAddress,omitempty"`
+
+	// HostNetworkAttachment references the HostNetworkAttachment for this interface
+	HostNetworkAttachment HostNetworkAttachmentRef `json:"hostNetworkAttachment,omitempty"`
+}
+
+const (
+	// ConditionNetworkInterfacesValid is the condition type for network interface validation.
+	ConditionNetworkInterfacesValid string = "NetworkInterfacesValid"
+)
+
 // BareMetalHostSpec defines the desired state of BareMetalHost.
 type BareMetalHostSpec struct {
 	// Important: Run "make generate manifests" to regenerate code
@@ -513,6 +536,14 @@ type BareMetalHostSpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=disabled;agent
 	InspectionMode InspectionMode `json:"inspectionMode,omitempty"`
+
+	// NetworkInterfaces defines the network configuration for each interface.
+	// This will be used to configure switch ports for the host.  Interface
+	// names must correspond to actual NICs discovered in hardware details by
+	// the hardware inspection process.  They are referenced by either the name
+	// or MAC address of the NIC.
+	// +optional
+	NetworkInterfaces []NetworkInterface `json:"networkInterfaces,omitempty"`
 }
 
 // AutomatedCleaningMode is the interface to enable/disable automated cleaning
@@ -710,6 +741,18 @@ type BareMetalHostStatus struct {
 	// ErrorCount records how many times the host has encoutered an error since the last successful operation
 	// +kubebuilder:default:=0
 	ErrorCount int `json:"errorCount"`
+
+	// Conditions holds status conditions for the BareMetalHost
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+
+	// AppliedNetworkInterfaces stores the network interface configuration that was last successfully applied to Ironic
+	// +optional
+	AppliedNetworkInterfaces []NetworkInterface `json:"appliedNetworkInterfaces,omitempty"`
 }
 
 // ProvisionStatus holds the state information for a single target.
@@ -1022,6 +1065,19 @@ func (image *Image) GetChecksum() (checksum, checksumType string, err error) {
 
 	checksum = image.Checksum
 	return checksum, checksumType, nil
+}
+
+// IsValid returns true if the network interface is valid.
+func (iface *NetworkInterface) IsValid() bool {
+	return iface.Name != "" || iface.MACAddress != ""
+}
+
+// GetKey returns the key to use for the network interface.
+func (iface *NetworkInterface) GetKey() string {
+	if iface.MACAddress != "" {
+		return iface.MACAddress
+	}
+	return iface.Name
 }
 
 // +kubebuilder:object:root=true

@@ -101,6 +101,8 @@ type Fixture struct {
 	HostFirmwareSettings HostFirmwareSettingsMock
 
 	HostFirmwareComponents HostFirmwareComponentsMock
+
+	switchPortConfigs map[string]*provisioner.SwitchPortConfig
 }
 
 // NewProvisioner returns a new Fixture Provisioner.
@@ -427,5 +429,10 @@ func (p *fixtureProvisioner) AttachDataImage(_ string) (err error) {
 }
 
 func (p *fixtureProvisioner) DetachDataImage() (err error) {
+	return nil
+}
+
+func (p *fixtureProvisioner) SetSwitchPortConfigs(configs map[string]*provisioner.SwitchPortConfig) (err error) {
+	p.state.switchPortConfigs = configs
 	return nil
 }

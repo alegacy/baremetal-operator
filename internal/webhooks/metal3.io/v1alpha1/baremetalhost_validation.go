@@ -90,6 +90,12 @@ func (webhook *BareMetalHost) validateHost(host *metal3api.BareMetalHost) []erro
 		errs = append(errs, err)
 	}
 
+	if len(host.Spec.NetworkInterfaces) > 0 {
+		if ifaceErrors := validateNetworkInterfaces(host.Spec.NetworkInterfaces); ifaceErrors != nil {
+			errs = append(errs, ifaceErrors...)
+		}
+	}
+
 	return errs
 }
 
@@ -428,4 +434,53 @@ func validatePowerStatus(host *metal3api.BareMetalHost) error {
 		return errors.New("node can't simultaneously have online set to false and have power off disabled")
 	}
 	return nil
+}
+
+// macAddressRegex matches valid MAC addresses in various common formats.
+var macAddressRegex = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$`)
+
+// interfaceNameRegex matches valid network interface names (alphanumeric, hyphens, underscores, dots).
+var interfaceNameRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+// validateNetworkInterfaces validates NetworkInterface specifications.
+func validateNetworkInterfaces(networkInterfaces []metal3api.NetworkInterface) []error {
+	var errs []error
+
+	for i, iface := range networkInterfaces {
+		// At least one identifier (Name or MACAddress) must be specified
+		if !iface.IsValid() {
+			errs = append(errs, fmt.Errorf("networkInterfaces[%d]: must specify either name or macAddress", i))
+			continue
+		}
+
+		// Validate MAC address format if specified
+		if iface.MACAddress != "" {
+			if !macAddressRegex.MatchString(iface.MACAddress) {
+				errs = append(errs, fmt.Errorf("networkInterfaces[%d]: invalid MAC address format: %s (expected format: AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF)", i, iface.MACAddress))
+			}
+		}
+
+		// Validate interface name if specified
+		if iface.Name != "" {
+			if !interfaceNameRegex.MatchString(iface.Name) {
+				errs = append(errs, fmt.Errorf("networkInterfaces[%d]: invalid interface name: %s (must contain only alphanumeric characters, dots, hyphens, or underscores)", i, iface.Name))
+			}
+		}
+
+		// Validate HostNetworkAttachment reference if specified
+		if iface.HostNetworkAttachment.Name != "" {
+			// Name must be a valid Kubernetes resource name
+			if len(iface.HostNetworkAttachment.Name) > 253 {
+				errs = append(errs, fmt.Errorf("networkInterfaces[%d].hostNetworkAttachment.name: name too long (max 253 characters)", i))
+			}
+			// Namespace if specified must be valid
+			if iface.HostNetworkAttachment.Namespace != "" {
+				if len(iface.HostNetworkAttachment.Namespace) > 63 {
+					errs = append(errs, fmt.Errorf("networkInterfaces[%d].hostNetworkAttachment.namespace: namespace too long (max 63 characters)", i))
+				}
+			}
+		}
+	}
+
+	return errs
 }

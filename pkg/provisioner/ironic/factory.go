@@ -151,6 +151,7 @@ func (f ironicProvisionerFactory) ironicProvisioner(ctx context.Context, hostDat
 		nodeID:                  hostData.ProvisionerID,
 		bmcCreds:                hostData.BMCCredentials,
 		bmcAddress:              hostData.BMCAddress,
+		switchPortConfigs:       hostData.SwitchPortConfigs,
 		disableCertVerification: hostData.DisableCertificateVerification,
 		bootMACAddress:          hostData.BootMACAddress,
 		client:                  ironicClient,
@@ -223,6 +224,16 @@ func loadConfigFromEnv(havePreprovImgBuilder bool) (ironicConfig, error) {
 	}
 
 	c.provNetDisabled = strings.ToLower(os.Getenv("PROVISIONING_NETWORK_DISABLED")) == "true"
+
+	// Enable management of switch ports if networking is enabled
+	c.enableNetworking = strings.ToLower(os.Getenv("IRONIC_NETWORKING_ENABLED")) == "true"
+	if c.enableNetworking {
+		if value, found := os.LookupEnv("IRONIC_NETWORKING_INTERFACE"); found {
+			c.networkInterface = value
+		} else {
+			c.networkInterface = "ironic-networking"
+		}
+	}
 
 	return c, nil
 }

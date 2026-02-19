@@ -2,10 +2,12 @@ package ironic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -71,6 +73,8 @@ type ironicConfig struct {
 	maxBusyHosts                          int
 	externalURL                           string
 	provNetDisabled                       bool
+	enableNetworking                      bool
+	networkInterface                      string
 }
 
 // Provisioner implements the provisioning.Provisioner interface
@@ -84,6 +88,8 @@ type ironicProvisioner struct {
 	nodeID string
 	// the address of the BMC
 	bmcAddress string
+	// switch port configurations keyed by MAC address
+	switchPortConfigs map[string]*provisioner.SwitchPortConfig
 	// whether to disable SSL certificate verification
 	disableCertVerification bool
 	// credentials to log in to the BMC
@@ -167,6 +173,22 @@ func (p *ironicProvisioner) listAllPorts(address string) ([]ports.Port, error) {
 	return ports.ExtractPorts(allPages)
 }
 
+// listNodePorts returns all ports for a specific node.
+// This is more efficient than calling listAllPorts(MAC) for each NIC.
+func (p *ironicProvisioner) listNodePorts(nodeUUID string) ([]ports.Port, error) {
+	opts := ports.ListOpts{
+		NodeUUID: nodeUUID,
+	}
+
+	pager := ports.ListDetail(p.client, opts)
+	allPages, err := pager.AllPages(p.ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ports for node %s: %w", nodeUUID, err)
+	}
+
+	return ports.ExtractPorts(allPages)
+}
+
 func (p *ironicProvisioner) getNode() (*nodes.Node, error) {
 	if p.nodeID == "" {
 		return nil, provisioner.ErrNeedsRegistration
@@ -188,10 +210,10 @@ func (p *ironicProvisioner) getNode() (*nodes.Node, error) {
 }
 
 // Verifies that node has port assigned by Ironic.
-func (p *ironicProvisioner) nodeHasAssignedPort(ironicNode *nodes.Node) (bool, error) {
+func (p *ironicProvisioner) nodeHasAssignedPort(nodeUUID string) (bool, error) {
 	opts := ports.ListOpts{
 		Fields:   []string{"node_uuid"},
-		NodeUUID: ironicNode.UUID,
+		NodeUUID: nodeUUID,
 	}
 
 	pager := ports.List(p.client, opts)
@@ -207,11 +229,11 @@ func (p *ironicProvisioner) nodeHasAssignedPort(ironicNode *nodes.Node) (bool, e
 	}
 
 	if empty {
-		p.debugLog.Info("node has no assigned port", "node", ironicNode.UUID)
+		p.debugLog.Info("node has no assigned port", "node", nodeUUID)
 		return false, nil
 	}
 
-	p.debugLog.Info("node has assigned port", "node", ironicNode.UUID)
+	p.debugLog.Info("node has assigned port", "node", nodeUUID)
 	return true, nil
 }
 
@@ -298,19 +320,25 @@ func (p *ironicProvisioner) findExistingHost(bootMACAddress string) (ironicNode 
 	return nil, nil //nolint:nilnil
 }
 
-func (p *ironicProvisioner) createPXEEnabledNodePort(uuid, macAddress string) error {
+func (p *ironicProvisioner) createPXEEnabledNodePort(uuid, macAddress string, switchConfig *provisioner.SwitchPortConfig) error {
 	p.log.Info("creating PXE enabled ironic port for node", "NodeUUID", uuid, "MAC", macAddress)
 
 	enable := true
 
-	_, err := ports.Create(
-		p.ctx,
-		p.client,
-		ports.CreateOpts{
-			NodeUUID:   uuid,
-			Address:    macAddress,
-			PXEEnabled: &enable,
-		}).Extract()
+	createOpts := ports.CreateOpts{
+		NodeUUID:   uuid,
+		Address:    macAddress,
+		PXEEnabled: &enable,
+	}
+
+	// Set switch port configuration if networking is enabled
+	if p.config.enableNetworking && switchConfig != nil {
+		createOpts.Extra = map[string]interface{}{
+			"switchport": switchConfig,
+		}
+	}
+
+	_, err := ports.Create(p.ctx, p.client, createOpts).Extract()
 	if err != nil {
 		return fmt.Errorf("failed to create ironic port for node %s, MAC: %s: %w", uuid, macAddress, err)
 	}
@@ -2000,6 +2028,105 @@ func (p *ironicProvisioner) DetachDataImage() (err error) {
 	}).ExtractErr()
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// parseSwitchPortConfig converts a switchport config from Ironic (map[string]any)
+// into a SwitchPortConfig struct via JSON round-trip to handle type coercion.
+func parseSwitchPortConfig(raw any) *provisioner.SwitchPortConfig {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	config := &provisioner.SwitchPortConfig{}
+	if err := json.Unmarshal(data, config); err != nil {
+		return nil
+	}
+	return config
+}
+
+// switchPortConfigsEqual compares a switchport config from Ironic (map[string]any)
+// with a new SwitchPortConfig struct, handling JSON type conversions.
+func switchPortConfigsEqual(existing any, desired *provisioner.SwitchPortConfig) bool {
+	parsed := parseSwitchPortConfig(existing)
+	if parsed == nil {
+		return false
+	}
+
+	// Normalize nil vs empty slice for comparison
+	if len(parsed.AllowedVLANs) == 0 {
+		parsed.AllowedVLANs = nil
+	}
+	if len(desired.AllowedVLANs) == 0 {
+		desired.AllowedVLANs = nil
+	}
+
+	return reflect.DeepEqual(parsed, desired)
+}
+
+// SetSwitchPortConfigs applies switch port configurations to existing Ironic ports.
+// This is a self-contained implementation that:
+// 1. Lists existing ports for the node
+// 2. Matches configs by MAC address
+// 3. Updates/adds/removes extra.switchport as needed
+func (p *ironicProvisioner) SetSwitchPortConfigs(configs map[string]*provisioner.SwitchPortConfig) (err error) {
+	if p.nodeID == "" {
+		return fmt.Errorf("cannot set switch port configs: node not registered")
+	}
+
+	p.log.Info("applying switch port configs to existing ports", "configCount", len(configs))
+
+	// List existing ports for this node
+	existingPorts, err := p.listNodePorts(p.nodeID)
+	if err != nil {
+		return fmt.Errorf("failed to list ports for switch config: %w", err)
+	}
+
+	for _, port := range existingPorts {
+		mac := strings.ToLower(port.Address)
+		config, hasConfig := configs[mac]
+
+		if hasConfig && config != nil {
+			// Config exists for this port - check if update needed
+			if !switchPortConfigsEqual(port.Extra["switchport"], config) {
+				op := ports.AddOp
+				if _, exists := port.Extra["switchport"]; exists {
+					op = ports.ReplaceOp
+				}
+				updateOpts := ports.UpdateOpts{
+					ports.UpdateOperation{
+						Op:    op,
+						Path:  "/extra/switchport",
+						Value: config,
+					},
+				}
+				_, err := ports.Update(p.ctx, p.client, port.UUID, updateOpts).Extract()
+				if err != nil {
+					return fmt.Errorf("failed to update switchport config on port %s: %w", port.UUID, err)
+				}
+				p.log.Info("updated switch port config",
+					"port", port.UUID,
+					"MAC", port.Address,
+					"config", config)
+			}
+		} else if port.Extra != nil && port.Extra["switchport"] != nil {
+			// No config but port has switchport data - remove it
+			updateOpts := ports.UpdateOpts{
+				ports.UpdateOperation{
+					Op:   ports.RemoveOp,
+					Path: "/extra/switchport",
+				},
+			}
+			_, err := ports.Update(p.ctx, p.client, port.UUID, updateOpts).Extract()
+			if err != nil {
+				return fmt.Errorf("failed to remove switchport config from port %s: %w", port.UUID, err)
+			}
+			p.log.Info("removed orphaned switch port config",
+				"port", port.UUID,
+				"MAC", port.Address)
+		}
 	}
 
 	return nil

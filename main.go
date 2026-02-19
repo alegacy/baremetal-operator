@@ -16,6 +16,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -100,7 +101,7 @@ func setupChecks(mgr ctrl.Manager) {
 	}
 }
 
-func setupWebhooks(mgr ctrl.Manager) {
+func setupWebhooks(ctx context.Context, mgr ctrl.Manager) {
 	if err := (&webhooks.BareMetalHost{}).SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "BareMetalHost")
 		os.Exit(1)
@@ -108,6 +109,11 @@ func setupWebhooks(mgr ctrl.Manager) {
 
 	if err := (&webhooks.BMCEventSubscription{}).SetupWebhookWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create webhook", "webhook", "BareMetalHost")
+		os.Exit(1)
+	}
+
+	if err := (&webhooks.HostNetworkAttachment{}).SetupWebhookWithManager(ctx, mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "HostNetworkAttachment")
 		os.Exit(1)
 	}
 
@@ -442,7 +448,7 @@ func main() {
 	setupChecks(mgr)
 
 	if enableWebhook {
-		setupWebhooks(mgr)
+		setupWebhooks(context.Background(), mgr)
 	}
 
 	setupLog.Info("starting manager")

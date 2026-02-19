@@ -484,6 +484,13 @@ func (hsm *hostStateMachine) handleAvailable(info *reconcileInfo) actionResult {
 		return actionComplete{}
 	}
 
+	// TODO(alegacy): not sure that this is an appropriate use of Preparing
+	// Check if switch port configs have changed
+	if needsUpdate, _ := hsm.Reconciler.switchPortConfigurationNeedsUpdate(info.host); needsUpdate {
+		hsm.NextState = metal3api.StatePreparing
+		return actionComplete{}
+	}
+
 	if dirty, _, err := getHostProvisioningSettings(info.host, info); err != nil {
 		return actionError{err}
 	} else if dirty {

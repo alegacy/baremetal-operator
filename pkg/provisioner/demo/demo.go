@@ -339,3 +339,7 @@ func (p *demoProvisioner) AttachDataImage(_ string) (err error) {
 func (p *demoProvisioner) DetachDataImage() (err error) {
 	return nil
 }
+
+func (p *demoProvisioner) SetSwitchPortConfigs(configs map[string]*provisioner.SwitchPortConfig) (err error) {
+	return nil
+}

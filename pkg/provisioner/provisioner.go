@@ -20,6 +20,14 @@ Package provisioning defines the API for talking to the provisioning backend.
 // with provisioning.
 type EventPublisher func(reason, message string)
 
+// SwitchPortConfig represents the switchport configuration to be applied to node ports.
+type SwitchPortConfig struct {
+	Mode         string `json:"mode"`
+	NativeVLAN   int    `json:"native_vlan,omitempty"`
+	AllowedVLANs []int  `json:"allowed_vlans,omitempty"`
+	MTU          *int   `json:"mtu,omitempty"`
+}
+
 type HostData struct {
 	ObjectMeta                     metav1.ObjectMeta
 	BMCAddress                     string
@@ -27,6 +35,7 @@ type HostData struct {
 	DisableCertificateVerification bool
 	BootMACAddress                 string
 	ProvisionerID                  string
+	SwitchPortConfigs              map[string]*SwitchPortConfig
 }
 
 func BuildHostData(host metal3api.BareMetalHost, bmcCreds bmc.Credentials) HostData {
@@ -234,6 +243,9 @@ type Provisioner interface {
 
 	// Detach DataImage
 	DetachDataImage() (err error)
+
+	// SetSwitchPortConfigs sets the switch port configurations for the host
+	SetSwitchPortConfigs(configs map[string]*SwitchPortConfig) (err error)
 }
 
 // Result holds the response from a call in the Provsioner API.

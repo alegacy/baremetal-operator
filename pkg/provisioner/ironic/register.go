@@ -259,6 +259,10 @@ func (p *ironicProvisioner) enrollNode(data provisioner.ManagementAccessData, bm
 		},
 	}
 
+	if p.config.enableNetworking {
+		nodeCreateOpts.NetworkInterface = p.config.networkInterface
+	}
+
 	ironicNode, err = nodes.Create(p.ctx, p.client, nodeCreateOpts).Extract()
 	if err == nil {
 		p.publisher("Registered", "Registered new host")
@@ -272,7 +276,8 @@ func (p *ironicProvisioner) enrollNode(data provisioner.ManagementAccessData, bm
 	// If we know the MAC, create a port. Otherwise we will have
 	// to do this after we run the introspection step.
 	if p.bootMACAddress != "" {
-		err = p.createPXEEnabledNodePort(ironicNode.UUID, p.bootMACAddress)
+		err = p.createPXEEnabledNodePort(ironicNode.UUID, p.bootMACAddress,
+			p.switchPortConfigs[p.bootMACAddress])
 		if err != nil {
 			return nil, true, err
 		}
@@ -282,7 +287,7 @@ func (p *ironicProvisioner) enrollNode(data provisioner.ManagementAccessData, bm
 }
 
 func (p *ironicProvisioner) ensurePort(ironicNode *nodes.Node) error {
-	nodeHasAssignedPort, err := p.nodeHasAssignedPort(ironicNode)
+	nodeHasAssignedPort, err := p.nodeHasAssignedPort(ironicNode.UUID)
 	if err != nil {
 		return err
 	}
@@ -294,7 +299,8 @@ func (p *ironicProvisioner) ensurePort(ironicNode *nodes.Node) error {
 		}
 
 		if !addressIsAllocatedToPort {
-			err = p.createPXEEnabledNodePort(ironicNode.UUID, p.bootMACAddress)
+			err = p.createPXEEnabledNodePort(ironicNode.UUID, p.bootMACAddress,
+				p.switchPortConfigs[p.bootMACAddress])
 			if err != nil {
 				return err
 			}
