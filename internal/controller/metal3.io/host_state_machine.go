@@ -463,6 +463,13 @@ func (hsm *hostStateMachine) handleAvailable(ctx context.Context, info *reconcil
 		return actionComplete{}
 	}
 
+	// Check if port configs have changed before any other action since those
+	// other actions may depend on the network settings being adjusted.
+	if hsm.Reconciler.portConfigsNeedUpdate(info.host, info) {
+		hsm.NextState = metal3api.StatePreparing
+		return actionComplete{}
+	}
+
 	if inspectionRefreshRequested(hsm.Host) {
 		hsm.NextState = metal3api.StateInspecting
 		return actionComplete{}

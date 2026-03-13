@@ -64,6 +64,8 @@ intervals:
   default/wait-power-state: [ "5s", "10ms" ]
   default/wait-externally-provisioned: [ "1m", "10ms" ]
   baremetalswitch/wait-secret-updated: [ "30s", "500ms" ]
+  networking/wait-bmh-deleted: [ "60s", "1s" ]
+  networking/wait-hna-deleted: [ "30s", "500ms" ]
 
 bmoIronicUpgradeSpecs:
 - deployIronic: false

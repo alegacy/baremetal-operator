@@ -219,6 +219,9 @@ const (
 	WarningHealthReason = "Warning"
 	// CriticalHealthReason is the reason used when BMC reports critical errors.
 	CriticalHealthReason = "CriticalError"
+
+	// NetworkInterfacesValidCondition documents the validity of the network interfaces.
+	NetworkInterfacesValidCondition string = "NetworkInterfacesValid"
 )
 
 // OperationalStatus represents the state of the host.
@@ -866,6 +869,58 @@ type BareMetalHostStatus struct {
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=32
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// AppliedPortConfigs stores the resolved port configurations that were
+	// last successfully applied to Ironic ports. This records the actual
+	// VLAN/MTU/mode values (not HNA references) so that drift detection
+	// can identify changes to HostNetworkAttachment specs or deletions.
+	// +optional
+	AppliedPortConfigs []AppliedPortConfig `json:"appliedPortConfigs,omitempty"`
+}
+
+// SwitchPortConfig represents the switchport configuration to be applied to
+// node ports.  Includes JSON tags to facilitate marshaling to/from API format.
+type SwitchPortConfig struct {
+	// Mode is the switch port mode (access or trunk)
+	Mode SwitchPortMode `json:"mode"`
+	// NativeVLAN is the native/untagged VLAN ID
+	NativeVLAN int `json:"nativeVLAN"`
+	// AllowedVLANs is the list of allowed tagged VLAN IDs (trunk mode)
+	// +optional
+	AllowedVLANs []int `json:"allowedVLANs,omitempty"`
+	// MTU is the maximum transmission unit size
+	// +optional
+	MTU *int `json:"mtu,omitempty"`
+}
+
+// LocalLinkConnection represents the local link connection info to be applied
+// to node ports (if applicable).  Includes JSON tags to facilitate marshaling
+// to/from API format.
+type LocalLinkConnection struct {
+	// SwitchID is the management MAC address of the switch
+	SwitchID string `json:"switchID,omitempty"`
+	// PortID is the port name on the switch
+	PortID string `json:"portID,omitempty"`
+}
+
+// PortConfig represents the configuration attributes to be applied to node
+// ports.
+type PortConfig struct {
+	SwitchPortConfig SwitchPortConfig `json:"switchPortConfig"`
+	// LocalLinkConnection is only provided if the user has provided an
+	// override for what could be provided by LLDP during node inspection.
+	// +optional
+	LocalLinkConnection *LocalLinkConnection `json:"localLinkConnection,omitempty"`
+}
+
+// AppliedPortConfig records the port configuration that was last successfully
+// applied to an Ironic port for a network interface.
+type AppliedPortConfig struct {
+	// Name is the network interface name (e.g., "eno1np0")
+	Name             string           `json:"name"`
+	SwitchPortConfig SwitchPortConfig `json:"switchPortConfig"`
+	// +optional
+	LocalLinkConnection *LocalLinkConnection `json:"localLinkConnection,omitempty"`
 }
 
 // ProvisionStatus holds the state information for a single target.

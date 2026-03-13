@@ -75,6 +75,8 @@ type ironicConfig struct {
 	maxBusyHosts                          int
 	externalURL                           string
 	provNetDisabled                       bool
+	enableNetworking                      bool
+	networkInterface                      string
 }
 
 // Provisioner implements the provisioning.Provisioner interface
@@ -88,6 +90,8 @@ type ironicProvisioner struct {
 	nodeID string
 	// the address of the BMC
 	bmcAddress string
+	// port configurations keyed by MAC address
+	portConfigs map[string]*provisioner.PortConfig
 	// whether to disable SSL certificate verification
 	disableCertVerification bool
 	// credentials to log in to the BMC
@@ -147,6 +151,23 @@ func (p *ironicProvisioner) validateNode(ctx context.Context, ironicNode *nodes.
 		return errorMessage, nil
 	}
 	return "", nil
+}
+
+// listNodePorts returns all ports for a specific node.
+// This is more efficient than calling listAllPorts(MAC) for each NIC, but
+// also returns more columns for each port.
+func (p *ironicProvisioner) listNodePorts(ctx context.Context, nodeUUID string) ([]ports.Port, error) {
+	opts := ports.ListOpts{
+		NodeUUID: nodeUUID,
+	}
+
+	pager := ports.ListDetail(p.client, opts)
+	allPages, err := pager.AllPages(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ports for node %s: %w", nodeUUID, err)
+	}
+
+	return ports.ExtractPorts(allPages)
 }
 
 func (p *ironicProvisioner) getNode(ctx context.Context) (*nodes.Node, error) {
@@ -285,14 +306,25 @@ func (p *ironicProvisioner) createNodePort(ctx context.Context, uuid string, mac
 		return nil
 	}
 
-	_, err := ports.Create(
-		ctx,
-		p.client,
-		ports.CreateOpts{
-			NodeUUID:   uuid,
-			Address:    macAddress,
-			PXEEnabled: &pxe,
-		}).Extract()
+	createOpts := ports.CreateOpts{
+		NodeUUID:   uuid,
+		Address:    macAddress,
+		PXEEnabled: &pxe,
+	}
+
+	// Set port configuration if networking is enabled
+	if p.config.enableNetworking {
+		if portConfig, found := p.portConfigs[macAddress]; found {
+			createOpts.Extra = map[string]interface{}{
+				"switchport": portConfig.SwitchPortConfig,
+			}
+			if portConfig.LocalLinkConnection != nil {
+				createOpts.LocalLinkConnection = buildLocalLinkFromConfig(portConfig.LocalLinkConnection)
+			}
+		}
+	}
+
+	_, err := ports.Create(ctx, p.client, createOpts).Extract()
 	if err != nil {
 		return fmt.Errorf("failed to create ironic port for node %s, MAC: %s: %w", uuid, macAddress, err)
 	}

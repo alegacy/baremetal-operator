@@ -452,6 +452,11 @@ var networkInterfacesMutableStates = map[metal3api.ProvisioningState]bool{
 // validateNetworkInterfaceChanges blocks networkInterfaces modifications when
 // the host is past the available state (e.g., provisioning, provisioned,
 // deprovisioning). Changes are only allowed in early lifecycle states.
+//
+// Exception: networkInterfaces may be removed (set to nil/empty) during
+// deprovisioning or when provisioned if the same update also triggers
+// deprovisioning (e.g., image removed). The port configs will not be
+// cleared until the host returns to the available state.
 func validateNetworkInterfaceChanges(oldObj, newObj *metal3api.BareMetalHost) error {
 	if reflect.DeepEqual(oldObj.Spec.NetworkInterfaces, newObj.Spec.NetworkInterfaces) {
 		return nil
@@ -462,7 +467,43 @@ func validateNetworkInterfaceChanges(oldObj, newObj *metal3api.BareMetalHost) er
 		return nil
 	}
 
+	// Allow NI removal (not modification) during deprovisioning
+	niRemoved := len(newObj.Spec.NetworkInterfaces) == 0
+	if niRemoved && state == metal3api.StateDeprovisioning {
+		return nil
+	}
+
+	// Allow NI removal in provisioned state if deprovisioning is also
+	// being triggered in the same update
+	if niRemoved && state == metal3api.StateProvisioned && isDeprovisioningTriggered(oldObj, newObj) {
+		return nil
+	}
+
 	return fmt.Errorf("networkInterfaces can not be changed in the %q state", state)
+}
+
+// isDeprovisioningTriggered checks if the update would cause the host to
+// transition from provisioned to deprovisioning.
+func isDeprovisioningTriggered(oldObj, newObj *metal3api.BareMetalHost) bool {
+	// Image removed or cleared
+	if newObj.Spec.Image == nil || newObj.Spec.Image.URL == "" {
+		return true
+	}
+	// Image URL changed
+	if oldObj.Spec.Image != nil && newObj.Spec.Image.URL != oldObj.Spec.Image.URL {
+		return true
+	}
+	// CustomDeploy changed
+	if oldObj.Spec.CustomDeploy != nil && newObj.Spec.CustomDeploy != nil &&
+		oldObj.Spec.CustomDeploy.Method != newObj.Spec.CustomDeploy.Method {
+		return true
+	}
+	// CustomDeploy removed
+	if oldObj.Spec.CustomDeploy != nil && oldObj.Spec.CustomDeploy.Method != "" &&
+		(newObj.Spec.CustomDeploy == nil || newObj.Spec.CustomDeploy.Method == "") {
+		return true
+	}
+	return false
 }
 
 // validateNetworkInterfaces validates NetworkInterface specifications.

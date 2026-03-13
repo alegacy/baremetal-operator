@@ -1356,10 +1356,14 @@ func TestValidateUpdate(t *testing.T) {
 			name: "rejectNetworkInterfaceRemovalWhenProvisioned",
 			newBMH: &metal3api.BareMetalHost{
 				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image", Checksum: "abc123"},
+				},
 				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
 			oldBMH: &metal3api.BareMetalHost{
 				TypeMeta: tm, ObjectMeta: om,
 				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image", Checksum: "abc123"},
 					NetworkInterfaces: []metal3api.NetworkInterface{
 						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "my-attachment"}},
 					},
@@ -1416,6 +1420,119 @@ func TestValidateUpdate(t *testing.T) {
 				},
 				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
 			wantedErr: "",
+		},
+		{
+			name: "blockNIModificationWhenProvisioned",
+			newBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image"},
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "different-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			oldBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image"},
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "my-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			wantedErr: "networkInterfaces can not be changed in the \"provisioned\" state",
+		},
+		{
+			name: "blockNIRemovalWhenProvisionedWithoutDeprovisioning",
+			newBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image"},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			oldBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image"},
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "my-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			wantedErr: "networkInterfaces can not be changed in the \"provisioned\" state",
+		},
+		{
+			name: "allowNIRemovalWhenProvisionedWithImageRemoval",
+			newBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec:   metal3api.BareMetalHostSpec{},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			oldBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image"},
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "my-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			wantedErr: "",
+		},
+		{
+			name: "allowNIRemovalWhenProvisionedWithImageURLChange",
+			newBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/new-image", Checksum: "def456"},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			oldBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					Image: &metal3api.Image{URL: "http://example.com/image"},
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "my-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateProvisioned}}},
+			wantedErr: "",
+		},
+		{
+			name: "allowNIRemovalDuringDeprovisioning",
+			newBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec:   metal3api.BareMetalHostSpec{},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateDeprovisioning}}},
+			oldBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "my-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateDeprovisioning}}},
+			wantedErr: "",
+		},
+		{
+			name: "blockNIModificationDuringDeprovisioning",
+			newBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "different-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateDeprovisioning}}},
+			oldBMH: &metal3api.BareMetalHost{
+				TypeMeta: tm, ObjectMeta: om,
+				Spec: metal3api.BareMetalHostSpec{
+					NetworkInterfaces: []metal3api.NetworkInterface{
+						{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: "my-attachment"}},
+					},
+				},
+				Status: metal3api.BareMetalHostStatus{Provisioning: metal3api.ProvisionStatus{State: metal3api.StateDeprovisioning}}},
+			wantedErr: "networkInterfaces can not be changed in the \"deprovisioning\" state",
 		},
 	}
 

@@ -1405,6 +1405,48 @@ func (p *mockProvisioner) GetHealth(_ context.Context) string {
 	return ""
 }
 
+func (p *mockProvisioner) EnsurePorts(_ context.Context) error {
+	return nil
+}
+
+func TestHandleAvailablePortConfigChange(t *testing.T) {
+	theHost := host(metal3api.StateAvailable).build()
+
+	// Add network interfaces and hardware details
+	theHost.Spec.NetworkInterfaces = []metal3api.NetworkInterface{
+		{Name: "eth0"},
+	}
+	theHost.Status.HardwareDetails = &metal3api.HardwareDetails{
+		NIC: []metal3api.NIC{
+			{Name: "eth0", MAC: "00:11:22:33:44:55"},
+		},
+	}
+	// Set validation as passed
+	theHost.Status.Conditions = append(theHost.Status.Conditions, metav1.Condition{
+		Type:   metal3api.NetworkInterfacesValidCondition,
+		Status: metav1.ConditionTrue,
+		Reason: "AllInterfacesValid",
+	})
+	// Set applied port configs that differ from what info.portConfigs will have
+	theHost.Status.AppliedPortConfigs = []metal3api.AppliedPortConfig{
+		{Name: "eth0", SwitchPortConfig: metal3api.SwitchPortConfig{Mode: "access", NativeVLAN: 100}},
+	}
+
+	prov := newMockProvisioner()
+	reconciler := testNewReconciler(theHost)
+	hsm := newHostStateMachine(theHost, reconciler, prov, true)
+	info := makeDefaultReconcileInfo(theHost)
+
+	// Set port configs that differ from the applied configs (VLAN 200 vs 100)
+	info.portConfigs = map[string]*provisioner.PortConfig{
+		"00:11:22:33:44:55": {SwitchPortConfig: provisioner.SwitchPortConfig{Mode: "access", NativeVLAN: 200}},
+	}
+
+	hsm.ReconcileState(t.Context(), info)
+
+	assert.Equal(t, metal3api.StatePreparing, hsm.NextState, "expected transition to Preparing when port configs changed")
+}
+
 func TestUpdateBootModeStatus(t *testing.T) {
 	testCases := []struct {
 		Scenario       string

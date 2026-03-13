@@ -86,6 +86,7 @@ rules:
   resources:
   - baremetalswitches
   - hostdeploypolicies
+  - hostnetworkattachments
   verbs:
   - get
   - list
