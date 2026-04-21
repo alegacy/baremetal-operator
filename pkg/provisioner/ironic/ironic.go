@@ -110,6 +110,9 @@ type ironicProvisioner struct {
 	availableFeatures clients.AvailableFeatures
 	// node cache for the duration of reconcile
 	cachedNode *nodes.Node
+	// stored hardware details for port recreation after Ironic database loss
+	// populated from HardwareData CR or BMH status, may be nil during initial enrollment
+	storedHardwareDetails *metal3api.HardwareDetails
 }
 
 // FIXME(hroyrh) : move this to gophercloud when implementing
@@ -168,6 +171,39 @@ func (p *ironicProvisioner) listNodePorts(ctx context.Context, nodeUUID string) 
 	}
 
 	return ports.ExtractPorts(allPages)
+}
+
+// getStoredHardwareDetails returns stored hardware details for port recreation.
+// Returns nil during initial enrollment (before inspection) - this is expected.
+// After inspection or during re-registration, returns hardware details from
+// HardwareData CR or BMH status for recreating ports with LLDP data.
+func (p *ironicProvisioner) getStoredHardwareDetails() *metal3api.HardwareDetails {
+	return p.storedHardwareDetails
+}
+
+// deduplicateNICsByMAC filters NIC list to one entry per unique MAC address.
+// Hardware inspection may report the same NIC multiple times with different IPs
+// (IPv4/IPv6 or dual-stack), but we only want one Ironic port per MAC.
+// Returns deduplicated list preserving order of first occurrence.
+func deduplicateNICsByMAC(nics []metal3api.NIC) []metal3api.NIC {
+	seen := make(map[string]bool)
+	deduplicated := make([]metal3api.NIC, 0, len(nics))
+
+	for _, nic := range nics {
+		if nic.MAC == "" {
+			continue // Skip NICs without MAC address
+		}
+
+		// Normalize MAC address to lowercase for comparison
+		mac := strings.ToLower(nic.MAC)
+
+		if !seen[mac] {
+			seen[mac] = true
+			deduplicated = append(deduplicated, nic)
+		}
+	}
+
+	return deduplicated
 }
 
 func (p *ironicProvisioner) getNode(ctx context.Context) (*nodes.Node, error) {

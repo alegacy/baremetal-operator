@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -3598,4 +3600,123 @@ func createDockerConfigJSONSecretForTest(t *testing.T, name, ns string, auths ma
 			corev1.DockerConfigJsonKey: dockerConfigJSON,
 		},
 	}
+}
+
+func TestGetStoredHardwareDetails_FromHardwareDataCR(t *testing.T) {
+	host := newDefaultHost(t)
+
+	hwdata := &metal3api.HardwareData{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      host.Name,
+			Namespace: host.Namespace,
+		},
+		Spec: metal3api.HardwareDataSpec{
+			HardwareDetails: &metal3api.HardwareDetails{
+				Hostname: "from-hardwaredata",
+			},
+		},
+	}
+
+	r := newTestReconciler(t, host, hwdata)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Equal(t, "from-hardwaredata", details.Hostname)
+}
+
+func TestGetStoredHardwareDetails_FallbackToBMHStatus(t *testing.T) {
+	host := newDefaultHost(t)
+	host.Status.HardwareDetails = &metal3api.HardwareDetails{
+		Hostname: "from-bmh-status",
+	}
+
+	// No HardwareData CR exists
+	r := newTestReconciler(t, host)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Equal(t, "from-bmh-status", details.Hostname)
+}
+
+func TestGetStoredHardwareDetails_NoneAvailable(t *testing.T) {
+	host := newDefaultHost(t)
+	// No HardwareData CR and no HardwareDetails in status
+
+	r := newTestReconciler(t, host)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	assert.Nil(t, details)
+}
+
+func TestGetStoredHardwareDetails_HardwareDataCRPriority(t *testing.T) {
+	host := newDefaultHost(t)
+	// Both sources available - HardwareData CR should take priority
+	host.Status.HardwareDetails = &metal3api.HardwareDetails{
+		Hostname: "from-bmh-status",
+	}
+
+	hwdata := &metal3api.HardwareData{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      host.Name,
+			Namespace: host.Namespace,
+		},
+		Spec: metal3api.HardwareDataSpec{
+			HardwareDetails: &metal3api.HardwareDetails{
+				Hostname: "from-hardwaredata",
+			},
+		},
+	}
+
+	r := newTestReconciler(t, host, hwdata)
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.NoError(t, err)
+	require.NotNil(t, details)
+	assert.Equal(t, "from-hardwaredata", details.Hostname)
+}
+
+func TestGetStoredHardwareDetailsAPIError(t *testing.T) {
+	host := newDefaultHost(t)
+	// Put details in status so we can verify we never get to the fallback
+	host.Status.HardwareDetails = &metal3api.HardwareDetails{
+		Hostname: "from-bmh-status",
+	}
+
+	apiErr := errors.New("simulated API failure")
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, metal3api.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	c := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(host).
+		WithStatusSubresource(host).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*metal3api.HardwareData); ok {
+					return apiErr
+				}
+				return client.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	bmcSecret := newBMCCredsSecret(defaultSecretName, "User", "Pass")
+	require.NoError(t, c.Create(t.Context(), bmcSecret))
+
+	r := &BareMetalHostReconciler{
+		Client:             c,
+		ProvisionerFactory: &fixture.Fixture{},
+		Log:                ctrl.Log.WithName("controllers").WithName("BareMetalHost"),
+		APIReader:          c,
+	}
+
+	details, err := r.getStoredHardwareDetails(t.Context(), host)
+	require.Error(t, err, "should propagate non-NotFound API error")
+	assert.Nil(t, details)
+	assert.Contains(t, err.Error(), "simulated API failure")
 }

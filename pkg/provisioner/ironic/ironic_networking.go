@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 
 	"github.com/gophercloud/gophercloud/v2/openstack/baremetal/v1/ports"
+	metal3api "github.com/metal3-io/baremetal-operator/apis/metal3.io/v1alpha1"
 	"github.com/metal3-io/baremetal-operator/pkg/provisioner"
 )
 
@@ -24,6 +24,31 @@ func buildLocalLinkFromConfig(config *provisioner.LocalLinkConnection) map[strin
 		llc["port_id"] = config.PortID
 	}
 	return llc
+}
+
+// buildLocalLinkFromNIC creates a local_link_connection map from stored LLDP data.
+func buildLocalLinkFromNIC(nic metal3api.NIC) map[string]interface{} {
+	if nic.LLDP == nil {
+		return nil
+	}
+
+	connection := make(map[string]interface{})
+
+	if nic.LLDP.SwitchID != "" {
+		connection["switch_id"] = nic.LLDP.SwitchID
+	}
+	if nic.LLDP.PortID != "" {
+		connection["port_id"] = nic.LLDP.PortID
+	}
+	if nic.LLDP.SwitchSystemName != "" {
+		connection["switch_info"] = nic.LLDP.SwitchSystemName
+	}
+
+	if len(connection) == 0 {
+		return nil
+	}
+
+	return connection
 }
 
 // parseSwitchPortConfig converts a switchport config from Ironic (map[string]any)
@@ -60,7 +85,7 @@ func switchPortConfigsEqual(existing any, desired *provisioner.SwitchPortConfig)
 }
 
 // updatePort updates port with local_link_connection and switchport data.
-func (p *ironicProvisioner) updatePort(ctx context.Context, existingPort ports.Port, portConfig *provisioner.PortConfig) error {
+func (p *ironicProvisioner) updatePort(ctx context.Context, existingPort ports.Port, nic metal3api.NIC, portConfig *provisioner.PortConfig) error {
 	var updateOpts ports.UpdateOpts
 
 	// Add switch port config if available; otherwise remove
@@ -81,6 +106,15 @@ func (p *ironicProvisioner) updatePort(ctx context.Context, existingPort ports.P
 		if portConfig.LocalLinkConnection != nil {
 			llc := buildLocalLinkFromConfig(portConfig.LocalLinkConnection)
 			if !reflect.DeepEqual(existingPort.LocalLinkConnection, llc) {
+				updateOpts = append(updateOpts, ports.UpdateOperation{
+					Op:    ports.ReplaceOp,
+					Path:  "/local_link_connection",
+					Value: llc,
+				})
+			}
+		} else if len(existingPort.LocalLinkConnection) == 0 {
+			// No manual override — fall back to LLDP data from inspection
+			if llc := buildLocalLinkFromNIC(nic); llc != nil {
 				updateOpts = append(updateOpts, ports.UpdateOperation{
 					Op:    ports.ReplaceOp,
 					Path:  "/local_link_connection",
@@ -108,12 +142,72 @@ func (p *ironicProvisioner) updatePort(ctx context.Context, existingPort ports.P
 	return nil
 }
 
-// EnsurePorts ensures all network ports in Ironic have the correct switch
-// port configurations applied. It uses the switch port configs stored in
-// the provisioner (from HostData) and matches them to ports by interface
-// name or MAC address.
+// createPort creates new port with LLDP data (only called when port doesn't exist).
+func (p *ironicProvisioner) createPort(ctx context.Context, nodeUUID string, nic metal3api.NIC, pxeEnabled bool, portConfig *provisioner.PortConfig) error {
+	createOpts := ports.CreateOpts{
+		NodeUUID:   nodeUUID,
+		Address:    nic.MAC,
+		PXEEnabled: &pxeEnabled,
+	}
+
+	// Set switch port configuration
+	if portConfig != nil {
+		createOpts.Extra = map[string]interface{}{
+			"switchport": portConfig.SwitchPortConfig,
+		}
+		p.log.Info("setting extra.switchport on new port",
+			"interface", nic.Name,
+			"switchport", portConfig.SwitchPortConfig)
+	}
+
+	if portConfig != nil && portConfig.LocalLinkConnection != nil {
+		// If a manual override of LLC was provided then use it.
+		createOpts.LocalLinkConnection = buildLocalLinkFromConfig(portConfig.LocalLinkConnection)
+	} else if llc := buildLocalLinkFromNIC(nic); llc != nil {
+		// Otherwise, fallback to the inspection data from LLDP if available
+		createOpts.LocalLinkConnection = llc
+	}
+
+	_, err := ports.Create(ctx, p.client, createOpts).Extract()
+	if err != nil {
+		return fmt.Errorf("failed to create ironic port for node %s, interface %s, MAC: %s: %w",
+			nodeUUID, nic.Name, nic.MAC, err)
+	}
+
+	return nil
+}
+
+// ensurePort ensures a port exists for the given NIC with proper LLDP and switch configuration.
+func (p *ironicProvisioner) ensurePort(
+	ctx context.Context,
+	nodeUUID string,
+	nic metal3api.NIC,
+	pxeEnabled bool,
+	portConfig *provisioner.PortConfig,
+	existingPort *ports.Port,
+) error {
+	if existingPort != nil {
+		return p.updatePort(ctx, *existingPort, nic, portConfig)
+	}
+
+	// Port doesn't exist - create new port with LLDP data
+	p.log.Info("creating new port",
+		"MAC", nic.MAC,
+		"interface", nic.Name,
+		"pxeEnabled", pxeEnabled,
+		"node", nodeUUID)
+
+	return p.createPort(ctx, nodeUUID, nic, pxeEnabled, portConfig)
+}
+
+// EnsurePorts ensures all network ports exist in Ironic.
+// This is called:
+//   - After inspection completes (to create ports for all discovered NICs)
+//   - During re-registration (to recreate ports after Ironic database loss)
 func (p *ironicProvisioner) EnsurePorts(ctx context.Context) error {
 	if !p.config.enableNetworking {
+		// If the network feature isn't enabled then maintain the existing
+		// behaviour where only the PXE enabled port is created at registration.
 		return nil
 	}
 
@@ -121,21 +215,5 @@ func (p *ironicProvisioner) EnsurePorts(ctx context.Context) error {
 		return errors.New("cannot ensure ports: node not registered")
 	}
 
-	p.log.Info("ensuring port configs", "count", len(p.portConfigs))
-
-	// List existing ports for this node
-	existingPorts, err := p.listNodePorts(ctx, p.nodeID)
-	if err != nil {
-		return fmt.Errorf("failed to list ports: %w", err)
-	}
-
-	for _, port := range existingPorts {
-		mac := strings.ToLower(port.Address)
-		config := p.portConfigs[mac]
-		if err := p.updatePort(ctx, port, config); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return p.ensurePorts(ctx, p.nodeID)
 }

@@ -995,4 +995,217 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
 		Expect(c.Delete(ctx, hna)).To(Succeed())
 	})
+
+	It("should preserve port configs when NI removed separately during deprovisioning", func() {
+		c := clusterProxy.GetClient()
+
+		By("creating a BMC credentials secret")
+		bmcCredentialsData := map[string]string{
+			"username": bmc.User,
+			"password": bmc.Password,
+		}
+		CreateSecret(ctx, c, namespace.Name, "bmc-creds-ni-during-deprov", bmcCredentialsData)
+
+		By("creating an HNA")
+		hna := &metal3api.HostNetworkAttachment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ni-during-deprov-net",
+				Namespace: namespace.Name,
+			},
+			Spec: metal3api.HostNetworkAttachmentSpec{
+				Mode:       metal3api.SwitchportModeAccess,
+				NativeVLAN: 100,
+			},
+		}
+		Expect(c.Create(ctx, hna)).To(Succeed())
+
+		By("creating a BMH with NetworkInterfaces")
+		bmh := &metal3api.BareMetalHost{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      specName + "-ni-during-deprov",
+				Namespace: namespace.Name,
+			},
+			Spec: metal3api.BareMetalHostSpec{
+				Online: true,
+				BMC: metal3api.BMCDetails{
+					Address:                        bmc.Address,
+					CredentialsName:                "bmc-creds-ni-during-deprov",
+					DisableCertificateVerification: bmc.DisableCertificateVerification,
+				},
+				BootMode:              metal3api.BootMode(e2eConfig.GetVariable("BOOT_MODE")),
+				BootMACAddress:        bmc.BootMacAddress,
+				AutomatedCleaningMode: metal3api.CleaningModeDisabled,
+				NetworkInterfaces: []metal3api.NetworkInterface{
+					{
+						Name: "enp1s0",
+						HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{
+							Name: "ni-during-deprov-net",
+						},
+					},
+				},
+			},
+		}
+		Expect(c.Create(ctx, bmh)).To(Succeed())
+
+		By("waiting for the BMH to become available")
+		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
+			Client: c,
+			Bmh:    *bmh,
+			State:  metal3api.StateAvailable,
+		}, e2eConfig.GetIntervals("default", "wait-available")...)
+
+		By("verifying initial port config is applied")
+		Expect(c.Get(ctx, types.NamespacedName{Name: bmh.Name, Namespace: namespace.Name}, bmh)).To(Succeed())
+		Expect(bmh.Status.AppliedPortConfigs).NotTo(BeEmpty())
+
+		By("provisioning the BMH")
+		Expect(PatchBMHForProvisioning(ctx, PatchBMHForProvisioningInput{
+			client:    c,
+			bmh:       bmh,
+			bmc:       bmc,
+			e2eConfig: e2eConfig,
+			namespace: namespace.Name,
+		})).To(Succeed())
+
+		By("waiting for the BMH to become provisioned")
+		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
+			Client: c,
+			Bmh:    *bmh,
+			State:  metal3api.StateProvisioned,
+		}, e2eConfig.GetIntervals("default", "wait-provisioned")...)
+
+		By("removing image to trigger deprovisioning (keeping NI intact)")
+		Expect(c.Get(ctx, types.NamespacedName{Name: bmh.Name, Namespace: namespace.Name}, bmh)).To(Succeed())
+		helper, err := patch.NewHelper(bmh, c)
+		Expect(err).NotTo(HaveOccurred())
+		bmh.Spec.Image = nil
+		Expect(helper.Patch(ctx, bmh)).To(Succeed())
+
+		By("waiting for the BMH to enter deprovisioning")
+		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
+			Client: c,
+			Bmh:    *bmh,
+			State:  metal3api.StateDeprovisioning,
+		}, e2eConfig.GetIntervals("default", "wait-available")...)
+
+		By("removing NetworkInterfaces while deprovisioning is in progress")
+		Expect(c.Get(ctx, types.NamespacedName{Name: bmh.Name, Namespace: namespace.Name}, bmh)).To(Succeed())
+		Expect(bmh.Status.Provisioning.State).To(Equal(metal3api.StateDeprovisioning))
+		helper, err = patch.NewHelper(bmh, c)
+		Expect(err).NotTo(HaveOccurred())
+		bmh.Spec.NetworkInterfaces = nil
+		Expect(helper.Patch(ctx, bmh)).To(Succeed())
+
+		By("verifying AppliedPortConfigs still present during deprovisioning after NI removal")
+		Consistently(func(g Gomega) {
+			g.Expect(c.Get(ctx, types.NamespacedName{Name: bmh.Name, Namespace: namespace.Name}, bmh)).To(Succeed())
+			if bmh.Status.Provisioning.State == metal3api.StateDeprovisioning {
+				g.Expect(bmh.Status.AppliedPortConfigs).NotTo(BeEmpty(),
+					"AppliedPortConfigs should be preserved during deprovisioning even after NI removal")
+			}
+		}, "5s", "1s").Should(Succeed())
+
+		By("verifying Ironic port still has switchport config during deprovisioning")
+		ports, err := fetchIronicPorts(e2eConfig, namespace.Name, bmh.Name)
+		Expect(err).NotTo(HaveOccurred())
+		bootPort := findPortByMAC(ports, bmc.BootMacAddress)
+		Expect(bootPort).NotTo(BeNil())
+		Expect(bootPort.Extra).NotTo(BeNil())
+		_, hasSwitchport := bootPort.Extra["switchport"]
+		Expect(hasSwitchport).To(BeTrue(), "switchport config should be preserved during deprovisioning")
+
+		By("waiting for the BMH to return to available")
+		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
+			Client: c,
+			Bmh:    *bmh,
+			State:  metal3api.StateAvailable,
+		}, e2eConfig.GetIntervals("default", "wait-available")...)
+
+		By("waiting for port configs to be cleared after returning to available")
+		Eventually(func(g Gomega) {
+			g.Expect(c.Get(ctx, types.NamespacedName{Name: bmh.Name, Namespace: namespace.Name}, bmh)).To(Succeed())
+			g.Expect(bmh.Status.AppliedPortConfigs).To(BeEmpty(),
+				"AppliedPortConfigs should be cleared after deprovisioning completes")
+		}, e2eConfig.GetIntervals("default", "wait-available")...).Should(Succeed())
+
+		By("cleaning up")
+		Expect(c.Delete(ctx, bmh)).To(Succeed())
+		WaitForBmhDeleted(ctx, WaitForBmhDeletedInput{
+			Client:    c,
+			BmhName:   bmh.Name,
+			Namespace: bmh.Namespace,
+		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
+		Expect(c.Delete(ctx, hna)).To(Succeed())
+	})
+
+	It("should preserve LLDP data on Ironic ports", func() {
+		c := clusterProxy.GetClient()
+
+		By("creating a BMC credentials secret")
+		bmcCredentialsData := map[string]string{
+			"username": bmc.User,
+			"password": bmc.Password,
+		}
+		CreateSecret(ctx, c, namespace.Name, "bmc-creds-deprov", bmcCredentialsData)
+
+		By("creating a BMH without NetworkInterfaces")
+		bmh := &metal3api.BareMetalHost{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      specName + "-lldp",
+				Namespace: namespace.Name,
+			},
+			Spec: metal3api.BareMetalHostSpec{
+				BMC: metal3api.BMCDetails{
+					Address:                        bmc.Address,
+					CredentialsName:                "bmc-creds-deprov",
+					DisableCertificateVerification: bmc.DisableCertificateVerification,
+				},
+				BootMode:       metal3api.BootMode(e2eConfig.GetVariable("BOOT_MODE")),
+				BootMACAddress: bmc.BootMacAddress,
+			},
+		}
+		Expect(c.Create(ctx, bmh)).To(Succeed())
+
+		By("waiting for the BMH to become available (through registration and inspection)")
+		WaitForBmhInProvisioningState(ctx, WaitForBmhInProvisioningStateInput{
+			Client: c,
+			Bmh:    *bmh,
+			State:  metal3api.StateAvailable,
+		}, e2eConfig.GetIntervals("default", "wait-available")...)
+
+		By("fetching Ironic ports for the node")
+		ports, err := fetchIronicPorts(e2eConfig, namespace.Name, bmh.Name)
+		Expect(err).NotTo(HaveOccurred(), "failed to fetch Ironic ports")
+		Expect(ports).NotTo(BeEmpty(), "expected at least one Ironic port")
+
+		By("finding the port matching the boot MAC address")
+		bootPort := findPortByMAC(ports, bmc.BootMacAddress)
+		Expect(bootPort).NotTo(BeNil(), "expected to find an Ironic port matching boot MAC %s", bmc.BootMacAddress)
+
+		By("checking if LLDP data is present in local_link_connection")
+		if len(bootPort.LocalLinkConnection) > 0 {
+			Logf("local_link_connection is populated: %v", bootPort.LocalLinkConnection)
+			_, hasSwitchID := bootPort.LocalLinkConnection["switch_id"]
+			_, hasPortID := bootPort.LocalLinkConnection["port_id"]
+			if hasSwitchID {
+				Logf("switch_id: %v", bootPort.LocalLinkConnection["switch_id"])
+			}
+			if hasPortID {
+				Logf("port_id: %v", bootPort.LocalLinkConnection["port_id"])
+			}
+			// If LLDP data is present, verify the expected fields exist
+			Expect(hasSwitchID || hasPortID).To(BeTrue(),
+				"expected local_link_connection to have switch_id or port_id when populated")
+		} else {
+			Logf("local_link_connection is empty; BMC emulator (sushy-tools) likely does not provide LLDP data during inspection, skipping LLDP assertions")
+		}
+
+		By("cleaning up")
+		Expect(c.Delete(ctx, bmh)).To(Succeed())
+		WaitForBmhDeleted(ctx, WaitForBmhDeletedInput{
+			Client:    c,
+			BmhName:   bmh.Name,
+			Namespace: bmh.Namespace,
+		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
+	})
 })

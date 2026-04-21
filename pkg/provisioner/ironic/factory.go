@@ -158,6 +158,7 @@ func (f ironicProvisionerFactory) ironicProvisioner(ctx context.Context, hostDat
 		log:                     provisionerLogger,
 		debugLog:                provisionerLogger.V(1),
 		publisher:               publisher,
+		storedHardwareDetails:   hostData.HardwareDetails,
 	}
 
 	return p, nil

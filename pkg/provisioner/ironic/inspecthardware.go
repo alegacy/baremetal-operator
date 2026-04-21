@@ -132,6 +132,8 @@ func (p *ironicProvisioner) InspectHardware(ctx context.Context, data provisione
 	p.log.Info("inspection finished successfully", "data", response.Body)
 
 	details = hardwaredetails.GetHardwareDetails(introData, p.log)
+	// Update our cached copy
+	p.storedHardwareDetails = details
 	p.publisher("InspectionComplete", "Hardware inspection completed")
 	result, err = operationComplete()
 	return result, started, details, err

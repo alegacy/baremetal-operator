@@ -60,6 +60,11 @@ type HostData struct {
 	BootMACAddress                 string
 	ProvisionerID                  string
 	PortConfigs                    map[string]*PortConfig
+	// HardwareDetails contains stored hardware information from inspection
+	// for port recreation after Ironic database loss. Optional - if nil,
+	// only boot MAC port will be created. This is populated from the
+	// HardwareData CR or BMH status by the controller.
+	HardwareDetails *metal3api.HardwareDetails
 }
 
 func BuildHostData(host metal3api.BareMetalHost, bmcCreds bmc.Credentials) HostData {

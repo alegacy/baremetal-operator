@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"strings"
 
 	"github.com/gophercloud/gophercloud/v2"
 	"github.com/gophercloud/gophercloud/v2/openstack/baremetal/v1/nodes"
@@ -122,6 +123,15 @@ func (p *ironicProvisioner) Register(ctx context.Context, data provisioner.Manag
 		// Store the ID so other methods can assume it is set and so
 		// we can find the node again later.
 		provID = ironicNode.UUID
+
+		// Recreate ports from stored hardware details after Ironic DB
+		// loss.  If this fails the provisionerID will not be persisted,
+		// so the mismatch check below will retry on the next reconcile.
+		err = p.ensurePorts(ctx, ironicNode.UUID)
+		if err != nil {
+			result, err = transientError(err)
+			return result, provID, err
+		}
 	} else {
 		// FIXME(dhellmann): At this point we have found an existing
 		// node in ironic by looking it up. We need to check its
@@ -330,6 +340,130 @@ func (p *ironicProvisioner) createPortsForNode(ctx context.Context, ironicNode *
 		err := p.createNodePort(ctx, ironicNode.UUID, mac, pxe)
 		if err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+// ensurePorts ensures all network interface ports exist in Ironic.
+//
+// For initial enrollment (before inspection):
+//   - Creates only boot MAC port (hardware details not yet available)
+//
+// For re-registration or post-inspection:
+//   - Creates ports for all NICs from stored hardware details
+func (p *ironicProvisioner) ensurePorts(ctx context.Context, nodeUUID string) error {
+	hardwareDetails := p.getStoredHardwareDetails()
+
+	// If no hardware details available, fall back to boot MAC only
+	// This happens during initial enrollment before inspection
+	if hardwareDetails == nil {
+		p.log.Info("no stored hardware details available, ensuring boot MAC port only",
+			"nodeUUID", nodeUUID)
+
+		if p.bootMACAddress != "" {
+			return p.ensurePxePort(ctx, nodeUUID)
+		}
+		return nil
+	}
+
+	// TODO(alegacy): should we make this optional?
+
+	// Deduplicate NICs by MAC address to avoid duplicate ports
+	uniqueNICs := deduplicateNICsByMAC(hardwareDetails.NIC)
+
+	p.log.Info("ensuring ports for all network interfaces",
+		"count", len(uniqueNICs),
+		"nodeUUID", nodeUUID)
+
+	// List all existing ports for this node once
+	existingPorts, err := p.listNodePorts(ctx, nodeUUID)
+	if err != nil {
+		return fmt.Errorf("failed to list existing ports: %w", err)
+	}
+
+	// Build MAC → Port lookup map for fast access
+	portsByMAC := make(map[string]ports.Port)
+	for _, port := range existingPorts {
+		mac := strings.ToLower(port.Address)
+		portsByMAC[mac] = port
+	}
+
+	// Track failures for error reporting
+	var failures []string
+	successCount := 0
+
+	// Ensure each unique NIC has a port
+	for _, nic := range uniqueNICs {
+		if nic.MAC == "" {
+			continue // Skip NICs without MAC (should already be filtered)
+		}
+
+		isPXEPort := nic.PXE || strings.EqualFold(nic.MAC, p.bootMACAddress)
+
+		portConfig := p.portConfigs[strings.ToLower(nic.MAC)]
+
+		// Check if port already exists
+		var existingPort *ports.Port
+		if port, exists := portsByMAC[strings.ToLower(nic.MAC)]; exists {
+			existingPort = &port
+		}
+
+		err := p.ensurePort(ctx, nodeUUID, nic, isPXEPort, portConfig, existingPort)
+		if err != nil {
+			p.log.Error(err, "failed to ensure port for interface",
+				"interface", nic.Name,
+				"MAC", nic.MAC)
+			failures = append(failures, fmt.Sprintf("%s(%s): %v", nic.Name, nic.MAC, err))
+		} else {
+			successCount++
+		}
+	}
+
+	// Report results
+	if len(failures) > 0 {
+		p.log.Info("port reconciliation completed with failures",
+			"successful", successCount,
+			"failed", len(failures),
+			"total", len(uniqueNICs))
+		// Cap the number of failures reported in the error message
+		reported := failures
+		const maxReportedFailures = 3
+		if len(reported) > maxReportedFailures {
+			reported = reported[:maxReportedFailures]
+		}
+		return fmt.Errorf("failed to ensure %d/%d ports: %s",
+			len(failures), len(uniqueNICs), strings.Join(reported, "; "))
+	}
+
+	p.log.Info("successfully ensured all ports",
+		"count", successCount,
+		"nodeUUID", nodeUUID)
+
+	// TODO(alegacy): Remove stale Ironic ports that may no longer correspond
+	// to a NIC entry.  Maybe Ironic automatically does this after inspection?
+
+	return nil
+}
+
+func (p *ironicProvisioner) ensurePxePort(ctx context.Context, nodeUUID string) error {
+	nodeHasAssignedPort, err := p.nodeHasAssignedPort(ctx, nodeUUID)
+	if err != nil {
+		return err
+	}
+
+	if !nodeHasAssignedPort {
+		addressIsAllocatedToPort, err := p.isAddressAllocatedToPort(ctx, p.bootMACAddress)
+		if err != nil {
+			return err
+		}
+
+		if !addressIsAllocatedToPort {
+			err = p.createPXEEnabledNodePort(ctx, nodeUUID, p.bootMACAddress)
+			if err != nil {
+				return err
+			}
 		}
 	}
 

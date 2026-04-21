@@ -332,6 +332,42 @@ func (m *IronicMock) Port(port ports.Port) *IronicMock {
 	return m
 }
 
+// PortDetail configures the server with a valid response for
+//
+//	[GET] /v1/ports/detail
+//
+// This is used by listNodePorts() which calls ports.ListDetail()
+// with a node_uuid query parameter.  A handler is used instead of a
+// static ResponseJSON registration so the response is returned
+// regardless of query parameters.
+func (m *IronicMock) PortDetail(portList []ports.Port) *IronicMock {
+	resp := map[string][]ports.Port{
+		"ports": portList,
+	}
+
+	m.Handler("/v1/ports/detail", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, fmt.Sprintf("%s not handled for %s", r.Method, r.URL),
+				http.StatusNotImplemented)
+			return
+		}
+		m.SendJSONResponse(resp, http.StatusOK, w, r)
+	})
+	return m
+}
+
+// PortCreate configures the server with a valid response for
+//
+//	[POST] /v1/ports
+func (m *IronicMock) PortCreate(port ports.Port) *IronicMock {
+	content, err := json.Marshal(port)
+	if err != nil {
+		m.t.Error(err)
+	}
+	m.ResponseWithCode(m.buildURL("/v1/ports", http.MethodPost), string(content), http.StatusCreated)
+	return m
+}
+
 // Nodes configure the server with a valid response for /v1/nodes.
 func (m *IronicMock) Nodes(allNodes []nodes.Node) *IronicMock {
 	resp := struct {
