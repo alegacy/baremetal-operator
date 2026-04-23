@@ -181,7 +181,6 @@ func hardwareDetailsFor(bmc *BMC) string {
 	Expect(err).NotTo(HaveOccurred())
 	return buf.String()
 }
-
 var _ = Describe("External Inspection", Label("required", "external-inspection"), func() {
 	var (
 		specName      = "external-inspection"
