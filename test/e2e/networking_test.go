@@ -31,6 +31,11 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 		cancelWatches context.CancelFunc
 		toCleanup     []client.Object
 	)
+	deleteHNA := func(c client.Client, hna *metal3api.HostNetworkAttachment) {
+		Eventually(func() error {
+			return c.Delete(ctx, hna)
+		}, e2eConfig.GetIntervals(specName, "wait-hna-deleted")...).Should(Succeed())
+	}
 
 	BeforeEach(func() {
 		toCleanup = nil
@@ -146,8 +151,8 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
 
 		By("verifying the HNA can be deleted after BMH removal")
-		Expect(c.Delete(ctx, accessHNA)).To(Succeed())
-		Expect(c.Delete(ctx, trunkHNA)).To(Succeed())
+		deleteHNA(c, accessHNA)
+		deleteHNA(c, trunkHNA)
 
 		By("verifying the HNAs are actually deleted")
 		Eventually(func() bool {
@@ -246,7 +251,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
 
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should validate network interfaces and apply port configs through full lifecycle", func() {
@@ -331,7 +336,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should set NetworkInterfacesValid to False for invalid interface names", func() {
@@ -413,7 +418,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should re-apply port configs when NetworkInterfaces change on available host", func() {
@@ -528,8 +533,8 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna1)).To(Succeed())
-		Expect(c.Delete(ctx, hna2)).To(Succeed())
+		deleteHNA(c, hna1)
+		deleteHNA(c, hna2)
 	})
 
 	It("should apply switchport configuration to Ironic ports", func() {
@@ -717,7 +722,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should maintain port configs during deprovisioning", func() {
@@ -873,7 +878,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should clear port configs only after deprovisioning completes when NI removed atomically", func() {
@@ -1013,7 +1018,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should preserve port configs when NI removed separately during deprovisioning", func() {
@@ -1162,7 +1167,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should block provisioning when network interfaces reference missing HNA", func() {
@@ -1335,7 +1340,7 @@ var _ = Describe("networking", Label("required", "networking"), func() {
 			BmhName:   bmh.Name,
 			Namespace: bmh.Namespace,
 		}, e2eConfig.GetIntervals(specName, "wait-bmh-deleted")...)
-		Expect(c.Delete(ctx, hna)).To(Succeed())
+		deleteHNA(c, hna)
 	})
 
 	It("should preserve LLDP data on Ironic ports", func() {
