@@ -126,20 +126,37 @@ func (webhook *HostNetworkAttachment) findBMHReferences(ctx context.Context, att
 	}
 
 	var references []string
-	for _, bmh := range bmhList.Items {
+	for i := range bmhList.Items {
+		bmh := &bmhList.Items[i]
+		var bmhReferences []string
 		for _, netIf := range bmh.Spec.NetworkInterfaces {
 			refNS := netIf.HostNetworkAttachment.Namespace
 			if refNS == "" {
 				refNS = bmh.Namespace
 			}
-			if netIf.HostNetworkAttachment.Name == attachment.Name && refNS == attachment.Namespace {
-				ifID := netIf.Name
-				if ifID == "" {
-					ifID = netIf.MACAddress
-				}
-				references = append(references, fmt.Sprintf("%s/%s[%s]", bmh.Namespace, bmh.Name, ifID))
+			if netIf.HostNetworkAttachment.Name != attachment.Name || refNS != attachment.Namespace {
+				continue
 			}
+
+			ifID := netIf.Name
+			if ifID == "" {
+				ifID = netIf.MACAddress
+			}
+			bmhReferences = append(bmhReferences, fmt.Sprintf("%s/%s[%s]", bmh.Namespace, bmh.Name, ifID))
 		}
+		if len(bmhReferences) == 0 {
+			continue
+		}
+
+		// Only confirm BMHs that the cache shows as references. A stale cache
+		// entry for a deleted BMH must not block removal of the attachment.
+		if err := webhook.APIReader.Get(ctx, client.ObjectKeyFromObject(bmh), &metal3api.BareMetalHost{}); err != nil {
+			if k8serrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("failed to verify BMH %s/%s: %w", bmh.Namespace, bmh.Name, err)
+		}
+		references = append(references, bmhReferences...)
 	}
 
 	return references, nil
