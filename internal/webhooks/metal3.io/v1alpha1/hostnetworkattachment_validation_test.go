@@ -282,30 +282,25 @@ func TestFindBMHReferences(t *testing.T) {
 	testCases := []struct {
 		name              string
 		bmhs              []metal3api.BareMetalHost
-		expectedRefsCount int
-		expectedRefs      []string
+		expectedReference bool
 	}{
 		{
-			name:              "no-bmhs",
-			bmhs:              []metal3api.BareMetalHost{},
-			expectedRefsCount: 0,
+			name: "no-bmhs",
+			bmhs: []metal3api.BareMetalHost{},
 		},
 		{
 			name:              "one-bmh-with-reference",
 			bmhs:              []metal3api.BareMetalHost{*bmhWithReference},
-			expectedRefsCount: 1,
-			expectedRefs:      []string{"test-ns/host-with-ref[eth0]"},
+			expectedReference: true,
 		},
 		{
-			name:              "one-bmh-without-reference",
-			bmhs:              []metal3api.BareMetalHost{*bmhWithoutReference},
-			expectedRefsCount: 0,
+			name: "one-bmh-without-reference",
+			bmhs: []metal3api.BareMetalHost{*bmhWithoutReference},
 		},
 		{
 			name:              "mixed-bmhs",
 			bmhs:              []metal3api.BareMetalHost{*bmhWithReference, *bmhWithoutReference, *bmhWithDifferentAttachment},
-			expectedRefsCount: 1,
-			expectedRefs:      []string{"test-ns/host-with-ref[eth0]"},
+			expectedReference: true,
 		},
 	}
 
@@ -339,12 +334,9 @@ func TestFindBMHReferences(t *testing.T) {
 			}
 			webhook.APIReader = webhook.Client
 
-			refs, err := webhook.findBMHReferences(context.TODO(), attachment)
+			referenced, err := webhook.findBMHReferences(context.TODO(), attachment)
 			require.NoError(t, err)
-			assert.Len(t, refs, tc.expectedRefsCount)
-			if tc.expectedRefs != nil {
-				assert.Equal(t, tc.expectedRefs, refs)
-			}
+			assert.Equal(t, tc.expectedReference, referenced)
 		})
 	}
 }
@@ -405,7 +397,7 @@ func TestHNAValidateDeleteChecksLiveBMH(t *testing.T) {
 		{name: "live BMH dropped reference", liveBMH: &metal3api.BareMetalHost{ObjectMeta: cachedBMH.ObjectMeta}, expectedReads: 1},
 		{name: "still referenced", liveBMH: cachedBMH, expectedReads: 1, expectedError: "cannot delete attachment while referenced"},
 		{name: "multiple interfaces referencing attachment", cachedBMH: multipleReferences, liveBMH: multipleReferences,
-			expectedReads: 1, expectedError: "host-with-ref[eth0], test-ns/host-with-ref[eth1]"},
+			expectedReads: 1, expectedError: "one or more BMHs"},
 		{name: "API read error", readerFails: true, expectedReads: 1, expectedError: "API read failed"},
 	}
 
@@ -491,9 +483,9 @@ func TestHNAFindBMHReferencesShortCircuits(t *testing.T) {
 	}
 
 	webhook := &HostNetworkAttachment{Client: cachedClient, APIReader: apiReader}
-	refs, err := webhook.findBMHReferences(context.Background(), attachment)
+	referenced, err := webhook.findBMHReferences(context.Background(), attachment)
 	require.NoError(t, err)
-	require.Len(t, refs, 1)
+	require.True(t, referenced)
 	// A single confirmed live reference is enough to block the operation, so the
 	// second candidate is never read from the API reader.
 	require.Len(t, apiReader.reads, 1)
@@ -813,10 +805,9 @@ func TestFindBMHReferencesCrossNamespace(t *testing.T) {
 	}
 	webhook.APIReader = webhook.Client
 
-	refs, err := webhook.findBMHReferences(context.TODO(), attachment)
+	referenced, err := webhook.findBMHReferences(context.TODO(), attachment)
 	require.NoError(t, err)
-	assert.Len(t, refs, 1)
-	assert.Equal(t, []string{"tenant-ns/host-cross-ns[eth0]"}, refs)
+	assert.True(t, referenced)
 }
 
 func TestHNAValidateUpdateFailClosed(t *testing.T) {
@@ -972,8 +963,7 @@ func TestHNAValidateDeleteWarnings(t *testing.T) {
 	warnings, err := webhook.validateDelete(context.TODO(), attachment)
 	require.Error(t, err)
 	require.Len(t, warnings, 1)
-	assert.Contains(t, warnings[0], "host1")
-	assert.Contains(t, warnings[0], "referenced by")
+	assert.Contains(t, warnings[0], "one or more BMHs")
 }
 
 func TestFindBMHReferencesMultipleInterfacesSameBMH(t *testing.T) {
@@ -1015,11 +1005,9 @@ func TestFindBMHReferencesMultipleInterfacesSameBMH(t *testing.T) {
 	}
 	webhook.APIReader = webhook.Client
 
-	refs, err := webhook.findBMHReferences(context.TODO(), attachment)
+	referenced, err := webhook.findBMHReferences(context.TODO(), attachment)
 	require.NoError(t, err)
-	assert.Len(t, refs, 2)
-	assert.Contains(t, refs, "test-ns/multi-ref-host[eth0]")
-	assert.Contains(t, refs, "test-ns/multi-ref-host[eth1]")
+	assert.True(t, referenced)
 }
 
 // VLAN ID range validation is now handled by CRD schema markers

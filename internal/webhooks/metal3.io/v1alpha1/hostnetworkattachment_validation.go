@@ -70,14 +70,13 @@ func (webhook *HostNetworkAttachment) validateUpdate(ctx context.Context, oldAtt
 
 	// Spec has changed - check if any BMH references this attachment
 	// Fail-closed: if we cannot verify references, reject the update
-	references, err := webhook.findBMHReferences(ctx, oldAttachment)
+	referenced, err := webhook.findBMHReferences(ctx, oldAttachment)
 	if err != nil {
 		return warnings, fmt.Errorf("failed to check BMH references, cannot safely allow update: %w", err)
 	}
 
-	if len(references) > 0 {
-		return warnings, fmt.Errorf("HostNetworkAttachment spec is immutable while referenced by BMH interfaces: %s",
-			strings.Join(references, ", "))
+	if referenced {
+		return warnings, errors.New("HostNetworkAttachment spec is immutable while referenced by one or more BMHs")
 	}
 
 	hostnetworkattachmentlog.V(1).Info("no BMH references found, allowing update",
@@ -91,26 +90,25 @@ func (webhook *HostNetworkAttachment) validateDelete(ctx context.Context, attach
 	var warnings admission.Warnings
 
 	// Check if any BMH still references this attachment
-	references, err := webhook.findBMHReferences(ctx, attachment)
+	referenced, err := webhook.findBMHReferences(ctx, attachment)
 	if err != nil {
 		return warnings, fmt.Errorf("failed to check BMH references: %w", err)
 	}
 
-	if len(references) > 0 {
-		warnings = append(warnings, "This attachment is referenced by: "+strings.Join(references, ", "))
+	if referenced {
+		warnings = append(warnings, "This attachment is referenced by one or more BMHs")
 		return warnings, k8serrors.NewForbidden(
 			schema.GroupResource{Group: "metal3.io", Resource: "hostnetworkattachments"},
 			attachment.Name,
-			fmt.Errorf("cannot delete attachment while referenced by BMH interfaces: %s",
-				strings.Join(references, ", ")))
+			errors.New("cannot delete attachment while referenced by one or more BMHs"))
 	}
 
 	return warnings, nil
 }
 
-// findBMHReferences finds all BMH instances that reference this attachment.
+// findBMHReferences reports whether any live BMH references this attachment.
 // Uses a field indexer for efficient lookups (O(k) vs O(n) where k << n).
-func (webhook *HostNetworkAttachment) findBMHReferences(ctx context.Context, attachment *metal3api.HostNetworkAttachment) ([]string, error) {
+func (webhook *HostNetworkAttachment) findBMHReferences(ctx context.Context, attachment *metal3api.HostNetworkAttachment) (bool, error) {
 	bmhList := &metal3api.BareMetalHostList{}
 
 	// Use indexed field lookup for efficient querying
@@ -122,7 +120,7 @@ func (webhook *HostNetworkAttachment) findBMHReferences(ctx context.Context, att
 	}
 
 	if err := webhook.Client.List(ctx, bmhList, listOpts); err != nil {
-		return nil, fmt.Errorf("failed to list BMHs using index: %w", err)
+		return false, fmt.Errorf("failed to list BMHs using index: %w", err)
 	}
 
 	for i := range bmhList.Items {
@@ -131,7 +129,7 @@ func (webhook *HostNetworkAttachment) findBMHReferences(ctx context.Context, att
 		// The cache (and its index) can be stale. Only pay for an API-reader
 		// lookup when the cached object still appears to reference the
 		// attachment, keeping reads at zero in the common unreferenced case.
-		if len(attachmentInterfaces(cached, attachment)) == 0 {
+		if !bmhReferencesAttachment(cached, attachment) {
 			continue
 		}
 
@@ -145,43 +143,33 @@ func (webhook *HostNetworkAttachment) findBMHReferences(ctx context.Context, att
 			if k8serrors.IsNotFound(err) {
 				continue
 			}
-			return nil, fmt.Errorf("failed to verify BMH %s/%s: %w", cached.Namespace, cached.Name, err)
+			return false, fmt.Errorf("failed to verify BMH %s/%s: %w", cached.Namespace, cached.Name, err)
 		}
 
-		references := attachmentInterfaces(live, attachment)
-		if len(references) == 0 {
+		if !bmhReferencesAttachment(live, attachment) {
 			continue
 		}
 
 		// A single live reference is enough to block the operation. Return
 		// immediately to avoid confirming the remaining candidates against the
 		// API reader.
-		return references, nil
+		return true, nil
 	}
 
-	return nil, nil
+	return false, nil
 }
 
-// attachmentInterfaces returns the formatted reference identifiers for every
-// network interface on bmh that targets the given attachment.
-func attachmentInterfaces(bmh *metal3api.BareMetalHost, attachment *metal3api.HostNetworkAttachment) []string {
-	var references []string
+func bmhReferencesAttachment(bmh *metal3api.BareMetalHost, attachment *metal3api.HostNetworkAttachment) bool {
 	for _, netIf := range bmh.Spec.NetworkInterfaces {
 		refNS := netIf.HostNetworkAttachment.Namespace
 		if refNS == "" {
 			refNS = bmh.Namespace
 		}
-		if netIf.HostNetworkAttachment.Name != attachment.Name || refNS != attachment.Namespace {
-			continue
+		if netIf.HostNetworkAttachment.Name == attachment.Name && refNS == attachment.Namespace {
+			return true
 		}
-
-		ifID := netIf.Name
-		if ifID == "" {
-			ifID = netIf.MACAddress
-		}
-		references = append(references, fmt.Sprintf("%s/%s[%s]", bmh.Namespace, bmh.Name, ifID))
 	}
-	return references
+	return false
 }
 
 // validateSwitchportConfiguration validates mode-specific switchport constraints
