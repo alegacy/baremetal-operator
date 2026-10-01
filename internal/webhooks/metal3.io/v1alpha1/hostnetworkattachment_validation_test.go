@@ -402,6 +402,7 @@ func TestHNAValidateDeleteChecksLiveBMH(t *testing.T) {
 		{name: "cached reference to different attachment", cachedBMH: differentAttachment, readerFails: true},
 		{name: "cached reference to different namespace", cachedBMH: differentNamespace, readerFails: true},
 		{name: "deleted BMH", expectedReads: 1},
+		{name: "live BMH dropped reference", liveBMH: &metal3api.BareMetalHost{ObjectMeta: cachedBMH.ObjectMeta}, expectedReads: 1},
 		{name: "still referenced", liveBMH: cachedBMH, expectedReads: 1, expectedError: "cannot delete attachment while referenced"},
 		{name: "multiple interfaces referencing attachment", cachedBMH: multipleReferences, liveBMH: multipleReferences,
 			expectedReads: 1, expectedError: "host-with-ref[eth0], test-ns/host-with-ref[eth1]"},
@@ -447,6 +448,55 @@ func TestHNAValidateDeleteChecksLiveBMH(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHNAFindBMHReferencesShortCircuits(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, metal3api.AddToScheme(scheme))
+
+	attachment := &metal3api.HostNetworkAttachment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-attachment", Namespace: "test-ns"},
+	}
+	newBMH := func(name string) *metal3api.BareMetalHost {
+		return &metal3api.BareMetalHost{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "test-ns"},
+			Spec: metal3api.BareMetalHostSpec{
+				NetworkInterfaces: []metal3api.NetworkInterface{
+					{Name: "eth0", HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{Name: attachment.Name}},
+				},
+			},
+		}
+	}
+	bmhA, bmhB := newBMH("host-a"), newBMH("host-b")
+
+	indexFn := func(obj client.Object) []string {
+		b, _ := obj.(*metal3api.BareMetalHost)
+		var keys []string
+		for _, iface := range b.Spec.NetworkInterfaces {
+			if iface.HostNetworkAttachment.Name != "" {
+				keys = append(keys, fmt.Sprintf("%s/%s", b.Namespace, iface.HostNetworkAttachment.Name))
+			}
+		}
+		return keys
+	}
+
+	cachedClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(bmhA.DeepCopy(), bmhB.DeepCopy()).
+		WithIndex(&metal3api.BareMetalHost{}, bmhNetworkAttachmentIndexField, indexFn).
+		Build()
+	apiReader := &recordingHNAAPIReader{
+		Reader: fakeclient.NewClientBuilder().WithScheme(scheme).
+			WithRuntimeObjects(bmhA.DeepCopy(), bmhB.DeepCopy()).Build(),
+	}
+
+	webhook := &HostNetworkAttachment{Client: cachedClient, APIReader: apiReader}
+	refs, err := webhook.findBMHReferences(context.Background(), attachment)
+	require.NoError(t, err)
+	require.Len(t, refs, 1)
+	// A single confirmed live reference is enough to block the operation, so the
+	// second candidate is never read from the API reader.
+	require.Len(t, apiReader.reads, 1)
 }
 
 func TestHNAValidateUpdate(t *testing.T) {

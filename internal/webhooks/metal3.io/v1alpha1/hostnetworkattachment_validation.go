@@ -125,41 +125,63 @@ func (webhook *HostNetworkAttachment) findBMHReferences(ctx context.Context, att
 		return nil, fmt.Errorf("failed to list BMHs using index: %w", err)
 	}
 
-	var references []string
 	for i := range bmhList.Items {
-		bmh := &bmhList.Items[i]
-		var bmhReferences []string
-		for _, netIf := range bmh.Spec.NetworkInterfaces {
-			refNS := netIf.HostNetworkAttachment.Namespace
-			if refNS == "" {
-				refNS = bmh.Namespace
-			}
-			if netIf.HostNetworkAttachment.Name != attachment.Name || refNS != attachment.Namespace {
-				continue
-			}
+		cached := &bmhList.Items[i]
 
-			ifID := netIf.Name
-			if ifID == "" {
-				ifID = netIf.MACAddress
-			}
-			bmhReferences = append(bmhReferences, fmt.Sprintf("%s/%s[%s]", bmh.Namespace, bmh.Name, ifID))
-		}
-		if len(bmhReferences) == 0 {
+		// The cache (and its index) can be stale. Only pay for an API-reader
+		// lookup when the cached object still appears to reference the
+		// attachment, keeping reads at zero in the common unreferenced case.
+		if len(attachmentInterfaces(cached, attachment)) == 0 {
 			continue
 		}
 
-		// Only confirm BMHs that the cache shows as references. A stale cache
-		// entry for a deleted BMH must not block removal of the attachment.
-		if err := webhook.APIReader.Get(ctx, client.ObjectKeyFromObject(bmh), &metal3api.BareMetalHost{}); err != nil {
+		// Confirm against the live object. The cache may lag behind a BMH that
+		// was deleted or updated to drop the reference; neither must block
+		// removal or mutation of the attachment. Recomputing the references
+		// from the live spec (rather than reusing the cached interfaces) closes
+		// the window where only the reference, not the whole BMH, went stale.
+		live := &metal3api.BareMetalHost{}
+		if err := webhook.APIReader.Get(ctx, client.ObjectKeyFromObject(cached), live); err != nil {
 			if k8serrors.IsNotFound(err) {
 				continue
 			}
-			return nil, fmt.Errorf("failed to verify BMH %s/%s: %w", bmh.Namespace, bmh.Name, err)
+			return nil, fmt.Errorf("failed to verify BMH %s/%s: %w", cached.Namespace, cached.Name, err)
 		}
-		references = append(references, bmhReferences...)
+
+		references := attachmentInterfaces(live, attachment)
+		if len(references) == 0 {
+			continue
+		}
+
+		// A single live reference is enough to block the operation. Return
+		// immediately to avoid confirming the remaining candidates against the
+		// API reader.
+		return references, nil
 	}
 
-	return references, nil
+	return nil, nil
+}
+
+// attachmentInterfaces returns the formatted reference identifiers for every
+// network interface on bmh that targets the given attachment.
+func attachmentInterfaces(bmh *metal3api.BareMetalHost, attachment *metal3api.HostNetworkAttachment) []string {
+	var references []string
+	for _, netIf := range bmh.Spec.NetworkInterfaces {
+		refNS := netIf.HostNetworkAttachment.Namespace
+		if refNS == "" {
+			refNS = bmh.Namespace
+		}
+		if netIf.HostNetworkAttachment.Name != attachment.Name || refNS != attachment.Namespace {
+			continue
+		}
+
+		ifID := netIf.Name
+		if ifID == "" {
+			ifID = netIf.MACAddress
+		}
+		references = append(references, fmt.Sprintf("%s/%s[%s]", bmh.Namespace, bmh.Name, ifID))
+	}
+	return references
 }
 
 // validateSwitchportConfiguration validates mode-specific switchport constraints
