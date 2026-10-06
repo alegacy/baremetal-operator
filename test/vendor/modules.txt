@@ -260,7 +260,7 @@ github.com/olekukonko/tablewriter/pkg/twwarp
 github.com/olekukonko/tablewriter/pkg/twwidth
 github.com/olekukonko/tablewriter/renderer
 github.com/olekukonko/tablewriter/tw
-# github.com/onsi/ginkgo/v2 v2.32.1
+# github.com/onsi/ginkgo/v2 v2.32.2
 ## explicit; go 1.25.0
 github.com/onsi/ginkgo/v2
 github.com/onsi/ginkgo/v2/config
@@ -418,8 +418,6 @@ go.opentelemetry.io/otel/semconv/v1.41.0
 go.opentelemetry.io/otel/metric
 go.opentelemetry.io/otel/metric/embedded
 go.opentelemetry.io/otel/metric/noop
-# go.opentelemetry.io/otel/sdk v1.44.0
-## explicit; go 1.25.0
 # go.opentelemetry.io/otel/sdk/metric v1.44.0
 ## explicit; go 1.25.0
 # go.opentelemetry.io/otel/trace v1.44.0
@@ -1037,7 +1035,7 @@ k8s.io/utils/trace
 # libvirt.org/go/libvirt v1.12007.0
 ## explicit; go 1.11
 libvirt.org/go/libvirt
-# sigs.k8s.io/cluster-api v1.14.1
+# sigs.k8s.io/cluster-api v1.14.2
 ## explicit; go 1.26.0
 sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3
 sigs.k8s.io/cluster-api/cmd/clusterctl/client
@@ -1095,7 +1093,7 @@ sigs.k8s.io/cluster-api/api/ipam/v1beta2
 sigs.k8s.io/cluster-api/api/runtime/catalog
 sigs.k8s.io/cluster-api/api/runtime/hooks/v1alpha1
 sigs.k8s.io/cluster-api/api/runtime/v1beta2
-# sigs.k8s.io/cluster-api/test v1.14.1
+# sigs.k8s.io/cluster-api/test v1.14.2
 ## explicit; go 1.26.0
 sigs.k8s.io/cluster-api/test/framework
 sigs.k8s.io/cluster-api/test/framework/bootstrap
