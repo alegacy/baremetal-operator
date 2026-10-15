@@ -789,6 +789,99 @@ func TestBuildAppliedNetworkAttachmentConfigs(t *testing.T) {
 	assert.Equal(t, "Eth1/1", eth1.SwitchPort.PortID)
 }
 
+func TestBuildRecoveryPortConfigs(t *testing.T) {
+	mtu := 9000
+	host := &metal3api.BareMetalHost{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-host", Namespace: "test-ns"},
+		Spec: metal3api.BareMetalHostSpec{
+			NetworkInterfaces: []metal3api.NetworkInterface{
+				{
+					Name: "eth0",
+					HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{
+						Name: "deleted-attachment",
+					},
+				},
+				{
+					Name: "eth1",
+				},
+				{
+					Name:       "eth2",
+					MACAddress: "AA:BB:CC:DD:EE:F2",
+					HostNetworkAttachment: metal3api.HostNetworkAttachmentRef{
+						Name: "deleted-attachment",
+					},
+				},
+			},
+		},
+		Status: metal3api.BareMetalHostStatus{
+			HardwareDetails: &metal3api.HardwareDetails{
+				NIC: []metal3api.NIC{
+					{Name: "eth0", MAC: "AA:BB:CC:DD:EE:F0"},
+					{Name: "eth1", MAC: "AA:BB:CC:DD:EE:F1"},
+					{MAC: "AA:BB:CC:DD:EE:F2"},
+				},
+			},
+			AppliedNetworkAttachmentConfigs: []metal3api.AppliedNetworkAttachmentConfig{
+				{
+					Name: "eth0",
+					SwitchPortConfig: metal3api.SwitchPortConfig{
+						Mode:         metal3api.SwitchportModeTrunk,
+						NativeVLAN:   1,
+						AllowedVLANs: []int{10, 20},
+						MTU:          &mtu,
+					},
+					SwitchPort: &metal3api.SwitchPortIdentifier{
+						SwitchID: "switch1",
+						PortID:   "Ethernet1/1",
+					},
+				},
+				{
+					Name: "aa:bb:cc:dd:ee:f1",
+					SwitchPortConfig: metal3api.SwitchPortConfig{
+						Mode:       metal3api.SwitchportModeAccess,
+						NativeVLAN: 100,
+					},
+				},
+				{
+					Name: "aa:bb:cc:dd:ee:f2",
+					SwitchPortConfig: metal3api.SwitchPortConfig{
+						Mode:       metal3api.SwitchportModeAccess,
+						NativeVLAN: 200,
+					},
+				},
+			},
+		},
+	}
+	info := &reconcileInfo{host: host}
+
+	configs := buildRecoveryPortConfigs(info)
+
+	require.Len(t, configs, 3)
+	config := configs["aa:bb:cc:dd:ee:f0"]
+	require.NotNil(t, config)
+	assert.Equal(t, metal3api.SwitchportModeTrunk, config.SwitchPortConfig.Mode)
+	assert.Equal(t, 1, config.SwitchPortConfig.NativeVLAN)
+	assert.Equal(t, []int{10, 20}, config.SwitchPortConfig.AllowedVLANs)
+	assert.Equal(t, &mtu, config.SwitchPortConfig.MTU)
+	require.NotNil(t, config.SwitchPortIdentifier)
+	assert.Equal(t, "switch1", config.SwitchPortIdentifier.SwitchID)
+	assert.Equal(t, "Ethernet1/1", config.SwitchPortIdentifier.PortID)
+
+	// Recovery restores the full last-applied snapshot, including configs for
+	// interfaces that are no longer referenced by an HNA in the current spec.
+	staleConfig := configs["aa:bb:cc:dd:ee:f1"]
+	require.NotNil(t, staleConfig)
+	assert.Equal(t, metal3api.SwitchportModeAccess, staleConfig.SwitchPortConfig.Mode)
+	assert.Equal(t, 100, staleConfig.SwitchPortConfig.NativeVLAN)
+
+	// When hardware details do not provide the NIC name, the applied config
+	// stores the MAC in Name; recovery should still restore it under its MAC.
+	macNamedConfig := configs["aa:bb:cc:dd:ee:f2"]
+	require.NotNil(t, macNamedConfig)
+	assert.Equal(t, metal3api.SwitchportModeAccess, macNamedConfig.SwitchPortConfig.Mode)
+	assert.Equal(t, 200, macNamedConfig.SwitchPortConfig.NativeVLAN)
+}
+
 func TestClearNetworkInterfaceValidation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = metal3api.AddToScheme(scheme)

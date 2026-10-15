@@ -2187,6 +2187,153 @@ func TestRegisterNewNodeWithLLDPAndManualOverride(t *testing.T) {
 	assert.Equal(t, "manual-switch-name", port.LocalLinkConnection["switch_info"])
 }
 
+func TestRegisterNewNodeWithRecoveryPortConfig(t *testing.T) {
+	host := makeHost()
+	host.Spec.BootMACAddress = "aa:bb:cc:dd:ee:ff"
+	host.Status.Provisioning.ID = ""
+
+	hardwareData := &metal3api.HardwareData{
+		Spec: metal3api.HardwareDataSpec{
+			HardwareDetails: &metal3api.HardwareDetails{
+				NIC: []metal3api.NIC{{MAC: "aa:bb:cc:dd:ee:ff", PXE: true, Name: "eth0"}},
+			},
+		},
+	}
+	createdPorts := []ports.Port{}
+
+	ironic := testserver.NewIronic(t)
+	ironic.AddDefaultResponse("/v1/nodes/myns"+nameSeparator+"myhost", "GET", http.StatusNotFound, "")
+	ironic.AddDefaultResponse("/v1/nodes/myhost", "GET", http.StatusNotFound, "")
+	ironic.AddDefaultResponse("/v1/nodes/new-node-uuid", "PATCH", http.StatusOK,
+		`{"uuid": "new-node-uuid", "provision_state": "enroll"}`)
+	ironic.AddDefaultResponse("/v1/nodes/new-node-uuid/states/provision", "PUT", http.StatusAccepted, "{}")
+	ironic.Handler("/v1/nodes", setupNodeHandlerForRegister(string(nodes.Enroll)))
+	ironic.Handler("/v1/ports", setupPortHandler(&createdPorts))
+	ironic.AddDefaultResponse("/v1/ports/detail", "GET", http.StatusOK, `{"ports": []}`)
+	ironic.Start()
+	defer ironic.Stop()
+
+	auth := clients.AuthConfig{Type: clients.NoAuth}
+	prov, err := newProvisionerWithSettings(host, bmc.Credentials{}, nullEventPublisher, ironic.Endpoint(), auth)
+	require.NoError(t, err)
+	prov.config.enableNetworking = true
+
+	result, provID, err := prov.Register(t.Context(), provisioner.ManagementAccessData{
+		HardwareData: hardwareData,
+		PortConfigs: map[string]*provisioner.PortConfig{
+			"aa:bb:cc:dd:ee:ff": {
+				SwitchPortConfig: metal3api.SwitchPortConfig{
+					Mode:       metal3api.SwitchportModeAccess,
+					NativeVLAN: 200,
+				},
+			},
+		},
+		RecoveryPortConfigs: map[string]*provisioner.PortConfig{
+			"aa:bb:cc:dd:ee:ff": {
+				SwitchPortConfig: metal3api.SwitchPortConfig{
+					Mode:         metal3api.SwitchportModeTrunk,
+					NativeVLAN:   1,
+					AllowedVLANs: []int{10, 20},
+				},
+				SwitchPortIdentifier: &metal3api.SwitchPortIdentifier{
+					SwitchID: "recovered-switch",
+					PortID:   "Ethernet1/1",
+				},
+			},
+		},
+	}, false, false)
+
+	require.NoError(t, err)
+	assert.Empty(t, result.ErrorMessage)
+	assert.Equal(t, "new-node-uuid", provID)
+	require.Len(t, createdPorts, 1)
+
+	switchPort, ok := createdPorts[0].Extra["switchport"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "trunk", switchPort["mode"])
+	assert.InDelta(t, 1, switchPort["native_vlan"], 0)
+	assert.Equal(t, []interface{}{float64(10), float64(20)}, switchPort["allowed_vlans"])
+	assert.Equal(t, "recovered-switch", createdPorts[0].LocalLinkConnection["switch_id"])
+	assert.Equal(t, "Ethernet1/1", createdPorts[0].LocalLinkConnection["port_id"])
+}
+
+func TestRegisterExistingReplacementNodeWithRecoveryPortConfig(t *testing.T) {
+	host := makeHost()
+	host.Spec.BootMACAddress = "aa:bb:cc:dd:ee:ff"
+	// The controller has not persisted the replacement node ID because the
+	// previous registration attempt was interrupted before it completed.
+	host.Status.Provisioning.ID = "old-node-uuid"
+
+	hardwareData := &metal3api.HardwareData{
+		Spec: metal3api.HardwareDataSpec{
+			HardwareDetails: &metal3api.HardwareDetails{
+				NIC: []metal3api.NIC{{MAC: "aa:bb:cc:dd:ee:ff", PXE: true, Name: "eth0"}},
+			},
+		},
+	}
+	createdPorts := []ports.Port{}
+
+	// Simulate the node having been created on the first attempt, but not its
+	// ports. The retry finds it by name while the BMH still stores the old ID.
+	existingNode := nodes.Node{
+		Name:           host.Namespace + nameSeparator + host.Name,
+		UUID:           "replacement-node-uuid",
+		ProvisionState: string(nodes.Enroll),
+	}
+	ironic := testserver.NewIronic(t)
+	ironic.AddDefaultResponse("/v1/nodes/old-node-uuid", "GET", http.StatusNotFound, "")
+	ironic.Node(existingNode).NodeUpdate(existingNode)
+	ironic.AddDefaultResponse("/v1/nodes/replacement-node-uuid/states/provision", "PUT", http.StatusAccepted, "{}")
+	ironic.Handler("/v1/ports", setupPortHandler(&createdPorts))
+	ironic.AddDefaultResponse("/v1/ports/detail", "GET", http.StatusOK, `{"ports": []}`)
+	ironic.Start()
+	defer ironic.Stop()
+
+	auth := clients.AuthConfig{Type: clients.NoAuth}
+	prov, err := newProvisionerWithSettings(host, bmc.Credentials{}, nullEventPublisher, ironic.Endpoint(), auth)
+	require.NoError(t, err)
+	prov.config.enableNetworking = true
+
+	result, provID, err := prov.Register(t.Context(), provisioner.ManagementAccessData{
+		State:        metal3api.StateRegistering,
+		HardwareData: hardwareData,
+		PortConfigs: map[string]*provisioner.PortConfig{
+			"aa:bb:cc:dd:ee:ff": {
+				SwitchPortConfig: metal3api.SwitchPortConfig{
+					Mode:       metal3api.SwitchportModeAccess,
+					NativeVLAN: 200,
+				},
+			},
+		},
+		RecoveryPortConfigs: map[string]*provisioner.PortConfig{
+			"aa:bb:cc:dd:ee:ff": {
+				SwitchPortConfig: metal3api.SwitchPortConfig{
+					Mode:         metal3api.SwitchportModeTrunk,
+					NativeVLAN:   1,
+					AllowedVLANs: []int{10, 20},
+				},
+				SwitchPortIdentifier: &metal3api.SwitchPortIdentifier{
+					SwitchID: "recovered-switch",
+					PortID:   "Ethernet1/1",
+				},
+			},
+		},
+	}, false, false)
+
+	require.NoError(t, err)
+	assert.Empty(t, result.ErrorMessage)
+	assert.Equal(t, "replacement-node-uuid", provID)
+	require.Len(t, createdPorts, 1)
+
+	switchPort, ok := createdPorts[0].Extra["switchport"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "trunk", switchPort["mode"])
+	assert.InDelta(t, 1, switchPort["native_vlan"], 0)
+	assert.Equal(t, []interface{}{float64(10), float64(20)}, switchPort["allowed_vlans"])
+	assert.Equal(t, "recovered-switch", createdPorts[0].LocalLinkConnection["switch_id"])
+	assert.Equal(t, "Ethernet1/1", createdPorts[0].LocalLinkConnection["port_id"])
+}
+
 func TestUpdateNodePort(t *testing.T) {
 	mtu := 9000
 

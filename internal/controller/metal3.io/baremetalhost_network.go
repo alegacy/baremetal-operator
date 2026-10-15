@@ -252,6 +252,34 @@ func buildAppliedNetworkAttachmentConfigs(info *reconcileInfo) []metal3api.Appli
 	return applied
 }
 
+// buildRecoveryPortConfigs reconstructs the last applied port configs from
+// status. These configs are only a recovery hint for a replacement Ironic
+// node; normal reconciliation continues to resolve the current HNAs.
+func buildRecoveryPortConfigs(info *reconcileInfo) map[string]*provisioner.PortConfig {
+	if len(info.host.Status.AppliedNetworkAttachmentConfigs) == 0 {
+		return nil
+	}
+
+	nics := nicsFromInfo(info)
+	nameToMAC := buildNICNameToMACMap(nics)
+
+	configs := make(map[string]*provisioner.PortConfig)
+	for _, applied := range info.host.Status.AppliedNetworkAttachmentConfigs {
+		mac := nameToMAC[applied.Name]
+		if mac == "" {
+			// Applied config names fall back to the MAC when the NIC has no name.
+			mac = strings.ToLower(applied.Name)
+		}
+
+		configs[mac] = &provisioner.PortConfig{
+			SwitchPortConfig:     *applied.SwitchPortConfig.DeepCopy(),
+			SwitchPortIdentifier: applied.SwitchPort.DeepCopy(),
+		}
+	}
+
+	return configs
+}
+
 // setNetworkInterfaceValidation updates the network interface validation condition.
 func (r *BareMetalHostReconciler) setNetworkInterfaceValidation(host *metal3api.BareMetalHost, status metav1.ConditionStatus, reason, message string) (bool, error) {
 	existing := meta.FindStatusCondition(host.Status.Conditions, metal3api.NetworkInterfacesValidCondition)
